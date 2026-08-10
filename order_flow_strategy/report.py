@@ -45,6 +45,8 @@ def format_stats(stats: PerformanceStats, title: str = "Backtest") -> str:
         f"Avg win / avg loss  {stats.avg_win_r:+.2f} R / {stats.avg_loss_r:+.2f} R"
         f"  (payoff {stats.payoff_ratio:.2f})",
         f"Profit factor       {stats.profit_factor:.2f}",
+        f"Cost hurdle         {stats.avg_cost_r:.2f} R per trade  "
+        f"({stats.total_costs:,.0f} total in fees and slippage)",
         THIN,
         f"Net P&L             {stats.total_pnl:,.2f}  ({_pct(stats.return_pct)} of starting equity)",
         f"Max drawdown        {stats.max_drawdown:,.2f}  ({_pct(stats.max_drawdown_pct)})",
@@ -72,6 +74,17 @@ def format_stats(stats: PerformanceStats, title: str = "Backtest") -> str:
 
 def warnings_for(stats: PerformanceStats) -> List[str]:
     out: List[str] = []
+    if stats.ruined:
+        out.append(
+            f"The account was wiped out at trade {stats.ruin_trade} of {stats.n_trades}. "
+            "Everything after that point is arithmetic on a dead account, not a result."
+        )
+    if stats.avg_cost_r >= 0.20:
+        out.append(
+            f"Costs eat {stats.avg_cost_r:.2f} R per trade before the strategy does "
+            "anything. The edge has to clear that hurdle twice over to be worth "
+            "trading -- widen the stop, cut the fee tier, or pick a cheaper venue."
+        )
     if stats.used_proxy_footprints:
         out.append(
             "Footprints were estimated from OHLCV, not measured from trades. "

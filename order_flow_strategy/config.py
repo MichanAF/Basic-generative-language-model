@@ -153,11 +153,23 @@ class StrategyConfig:
 
     # ------------------------------------------------------------------
     # Costs
+    #
+    # Both a fixed and a proportional component, because the two market types
+    # this targets charge differently. Futures are per contract, so the fixed
+    # terms fit. Crypto venues charge basis points of notional, and over a
+    # multi-year sample the underlying can move several-fold -- a fixed
+    # per-unit fee would misstate costs by that same factor. Set whichever
+    # matches your venue; they add, and leaving one at zero disables it.
     # ------------------------------------------------------------------
-    #: Slippage applied against the trade, in ticks, per fill.
+    #: Slippage against the trade, in ticks, per market/stop fill.
     slippage_ticks: float = 1.0
+    #: Additional slippage as a fraction of price (0.0001 = 1 bp).
+    slippage_pct: float = 0.0
     #: Commission in currency per unit per side.
     commission_per_side: float = 2.50
+    #: Additional commission as a fraction of notional per side
+    #: (0.0005 = 5 bp, roughly a crypto taker fee).
+    commission_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if self.entry_mode not in ENTRY_MODES:
@@ -175,6 +187,8 @@ class StrategyConfig:
                 raise ValueError("partial_at_r must be below target_r")
         if not 0 < self.cluster_frac <= 0.5:
             raise ValueError("cluster_frac must be in (0, 0.5]")
+        if self.slippage_pct < 0 or self.commission_pct < 0:
+            raise ValueError("percentage costs cannot be negative")
         if not self.trade_shorts and not self.trade_longs:
             raise ValueError("at least one of trade_shorts / trade_longs must be on")
 

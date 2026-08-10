@@ -46,6 +46,14 @@ class PerformanceStats:
     n_signals: int = 0
     signal_fill_rate: float = 0.0
     used_proxy_footprints: bool = False
+    #: Commission plus slippage as a fraction of the risk taken, averaged over
+    #: trades. The hurdle the edge must clear before a trade earns anything.
+    avg_cost_r: float = 0.0
+    total_costs: float = 0.0
+    final_equity: float = 0.0
+    #: True when equity was effectively wiped out during the run.
+    ruined: bool = False
+    ruin_trade: int = 0
 
     @property
     def is_statistically_thin(self) -> bool:
@@ -140,6 +148,22 @@ def summarize(result: BacktestResult) -> PerformanceStats:
     stats.short_expectancy_r = _mean([t.r_multiple for t in shorts])
 
     stats.exit_reasons = dict(Counter(t.exit_reason for t in trades))
+
+    stats.avg_cost_r = _mean([t.cost_r for t in trades])
+    stats.total_costs = sum(t.cost for t in trades)
+
+    stats.final_equity = result.equity_curve[-1] if result.equity_curve else start
+    # Fractional sizing means equity approaches zero asymptotically rather than
+    # crossing it, so treat "a rounding error of the starting stake" as ruin.
+    floor = 0.01 * start
+    if stats.final_equity <= floor:
+        stats.ruined = True
+        running = start
+        for i, t in enumerate(trades, 1):
+            running += t.pnl
+            if running <= floor:
+                stats.ruin_trade = i
+                break
     return stats
 
 

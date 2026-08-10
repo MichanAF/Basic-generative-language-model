@@ -42,6 +42,12 @@ class ClosedTrade:
     exit_reason: str
     level_price: float
     level_strength: float
+    #: Commission plus slippage actually paid, in currency.
+    cost: float = 0.0
+    #: Those costs expressed as a fraction of the risk taken. This is the
+    #: hurdle the edge has to clear before the trade makes anything, and on a
+    #: percentage-fee venue with a tight stop it can approach 0.5.
+    cost_r: float = 0.0
     reasons: List[str] = field(default_factory=list)
 
     @property
@@ -66,6 +72,10 @@ class _Position:
     best_price: float = 0.0
     worst_price: float = 0.0
     fills: int = 1
+    #: Slippage suffered on the entry fill, per unit.
+    entry_slip: float = 0.0
+    #: Commission and slippage paid so far, in currency.
+    cost_cash: float = 0.0
 
     def excursions(self) -> tuple:
         """``(mae_r, mfe_r)`` from the recorded price extremes."""
@@ -167,8 +177,15 @@ class Backtester:
         # Flatten anything still open at the end of the data.
         if position is not None:
             last_i = len(bars) - 1
+            final_close = bars[last_i].close
             closed, equity = self._close(
-                position, last_i, bars[last_i], bars[last_i].close, "end_of_data", equity
+                position,
+                last_i,
+                bars[last_i],
+                self._market_fill(position.direction, final_close, exiting=True),
+                "end_of_data",
+                equity,
+                self._slippage(final_close),
             )
             trades.append(closed)
             if curve:
@@ -196,9 +213,14 @@ class Backtester:
             qty = float(int(qty))
         return max(qty, 0.0)
 
+    def _slippage(self, price: float) -> float:
+        """Fixed plus proportional slippage, in price units."""
+        cfg = self.cfg
+        return cfg.slippage_ticks * cfg.tick_size + cfg.slippage_pct * abs(price)
+
     def _open(self, sig: Signal, index: int, raw_price: float, equity: float) -> Optional[_Position]:
         cfg = self.cfg
-        slip = cfg.slippage_ticks * cfg.tick_size
+        slip = self._slippage(raw_price)
         fill = raw_price - slip if sig.direction == SHORT else raw_price + slip
 
         risk = (sig.stop - fill) if sig.direction == SHORT else (fill - sig.stop)
@@ -223,6 +245,7 @@ class Backtester:
             level=sig.level,
             best_price=fill,
             worst_price=fill,
+            entry_slip=slip,
         )
 
     def _pending_invalidated(self, pending: _PendingEntry, bar: Bar) -> bool:
@@ -275,10 +298,11 @@ class Backtester:
         # Stop first: when both are inside the bar, assume the bad one.
         if stop_hit:
             fill = self._stop_fill(pos, bar)
+            raw = max(bar.open, pos.stop) if pos.direction == SHORT else min(bar.open, pos.stop)
             reason = "stop" if not pos.partial_done else "stop_after_partial"
             if pos.partial_done and cfg.breakeven_after_partial:
                 reason = "breakeven_after_partial"
-            return self._close(pos, index, bar, fill, reason, equity)
+            return self._close(pos, index, bar, fill, reason, equity, self._slippage(raw))
 
         # Scale out.
         if cfg.partial_at_r is not None and not pos.partial_done:
@@ -291,9 +315,11 @@ class Backtester:
             if reached:
                 fill = min(bar.open, level) if pos.direction == SHORT else max(bar.open, level)
                 qty = pos.quantity * cfg.partial_frac
-                equity += self._pnl(pos.direction, pos.entry_price, fill, qty)
+                leg = self._pnl(pos.direction, pos.entry_price, fill, qty)
+                equity += leg
                 pos.quantity -= qty
-                pos.realized += self._pnl(pos.direction, pos.entry_price, fill, qty)
+                pos.realized += leg
+                pos.cost_cash += self._leg_cost(pos, fill, qty, exit_slip=0.0)
                 pos.partial_done = True
                 pos.fills += 1
                 if cfg.breakeven_after_partial:
@@ -302,7 +328,7 @@ class Backtester:
         if target_hit:
             # Limit order: fills at the target, or better on a gap.
             fill = min(bar.open, pos.target) if pos.direction == SHORT else max(bar.open, pos.target)
-            return self._close(pos, index, bar, fill, "target", equity)
+            return self._close(pos, index, bar, fill, "target", equity, exit_slip=0.0)
 
         # Trail behind the favourable extreme.
         if cfg.trail_atr is not None:
@@ -316,35 +342,66 @@ class Backtester:
         if cfg.time_stop_bars is not None and not same_bar_entry:
             if index - pos.entry_index >= cfg.time_stop_bars:
                 fill = self._market_fill(pos.direction, bar.close, exiting=True)
-                return self._close(pos, index, bar, fill, "time_stop", equity)
+                return self._close(
+                    pos, index, bar, fill, "time_stop", equity, self._slippage(bar.close)
+                )
 
         return None, equity
 
     def _stop_fill(self, pos: _Position, bar: Bar) -> float:
         """Stops slip, and a gap through one fills at the open."""
-        cfg = self.cfg
-        slip = cfg.slippage_ticks * cfg.tick_size
         if pos.direction == SHORT:
-            return max(bar.open, pos.stop) + slip
-        return min(bar.open, pos.stop) - slip
+            raw = max(bar.open, pos.stop)
+            return raw + self._slippage(raw)
+        raw = min(bar.open, pos.stop)
+        return raw - self._slippage(raw)
 
     def _market_fill(self, direction: int, price: float, exiting: bool) -> float:
-        slip = self.cfg.slippage_ticks * self.cfg.tick_size
+        slip = self._slippage(price)
         if exiting:
             return price + slip if direction == SHORT else price - slip
         return price - slip if direction == SHORT else price + slip
 
-    def _pnl(self, direction: int, entry: float, exit_price: float, qty: float) -> float:
+    def _commission(self, price: float, qty: float) -> float:
+        """One side, for ``qty`` units filled at ``price``."""
+        cfg = self.cfg
+        notional = abs(price) * qty * self.point_value
+        return cfg.commission_per_side * qty + cfg.commission_pct * notional
+
+    def _leg_cost(self, pos: "_Position", exit_price: float, qty: float, exit_slip: float) -> float:
+        """Commission both sides plus slippage in and out, for one exit leg."""
+        return (
+            self._commission(pos.entry_price, qty)
+            + self._commission(exit_price, qty)
+            + (pos.entry_slip + exit_slip) * qty * self.point_value
+        )
+
+    def _gross(self, direction: int, entry: float, exit_price: float, qty: float) -> float:
         move = (entry - exit_price) if direction == SHORT else (exit_price - entry)
-        gross = move * qty * self.point_value
-        return gross - self.cfg.commission_per_side * qty * 2.0
+        return move * qty * self.point_value
+
+    def _pnl(self, direction: int, entry: float, exit_price: float, qty: float) -> float:
+        """Net of commission on both sides. Slippage is already in the prices."""
+        return (
+            self._gross(direction, entry, exit_price, qty)
+            - self._commission(entry, qty)
+            - self._commission(exit_price, qty)
+        )
 
     def _close(
-        self, pos: _Position, index: int, bar: Bar, fill: float, reason: str, equity: float
+        self,
+        pos: _Position,
+        index: int,
+        bar: Bar,
+        fill: float,
+        reason: str,
+        equity: float,
+        exit_slip: float = 0.0,
     ):
         pnl_leg = self._pnl(pos.direction, pos.entry_price, fill, pos.quantity)
         equity += pnl_leg
         total_pnl = pos.realized + pnl_leg
+        pos.cost_cash += self._leg_cost(pos, fill, pos.quantity, exit_slip)
 
         risk_cash = pos.risk_per_unit * pos.initial_quantity * self.point_value
         mae_r, mfe_r = pos.excursions()
@@ -366,6 +423,8 @@ class Backtester:
             exit_reason=reason,
             level_price=pos.level.price,
             level_strength=pos.level.strength,
+            cost=pos.cost_cash,
+            cost_r=pos.cost_cash / risk_cash if risk_cash > EPS else 0.0,
             reasons=list(pos.signal.reasons),
         )
         return trade, equity

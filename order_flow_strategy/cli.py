@@ -2,8 +2,15 @@
 
     python -m order_flow_strategy demo
     python -m order_flow_strategy backtest --trades ticks.csv --timeframe 300
+    python -m order_flow_strategy backtest --binance-klines data/btc --preset btc
     python -m order_flow_strategy optimize --bars bars.csv --folds 4
     python -m order_flow_strategy scan --trades ticks.csv --timeframe 300
+
+Fetching Binance archives is a separate step, since it is the only part that
+needs the network:
+
+    python -m order_flow_strategy.sources.fetch --symbol BTCUSDT --interval 5m \
+        --start 2023-08 --end 2025-07 --out data/btc
 """
 
 import argparse
@@ -23,6 +30,9 @@ from .data import (
 )
 from .metrics import summarize
 from .optimize import DEFAULT_GRID, FAST_GRID, format_recommendation, walk_forward
+from .presets import PRESETS
+from .presets import build as build_preset
+from .sources import load_binance_paths
 from .report import DISCLAIMER, format_levels, format_signal, format_stats, format_trades
 from .signals import SignalEngine, prepare
 
@@ -72,13 +82,31 @@ def _add_data_args(s: argparse.ArgumentParser) -> None:
     g.add_argument("--trades", metavar="PATH", help="Tick CSV: ts, price, size, side.")
     g.add_argument("--bars", metavar="PATH", help="OHLCV CSV (proxy footprints unless it carries ask/bid volume).")
     g.add_argument(
+        "--binance-klines",
+        nargs="+",
+        metavar="PATH",
+        help="Binance monthly kline .zip/.csv files or a directory of them. "
+        "Carries measured taker-buy volume, so bar delta is real.",
+    )
+    g.add_argument(
+        "--binance-aggtrades",
+        nargs="+",
+        metavar="PATH",
+        help="Binance monthly aggTrades .zip/.csv files or a directory. "
+        "The real tape, giving true footprints.",
+    )
+    g.add_argument(
         "--timeframe",
         type=float,
         default=300.0,
         help="Bar length in seconds when aggregating trades (default 300).",
     )
-    g.add_argument("--tick-size", type=float, default=0.25, help="Minimum price increment.")
-    g.add_argument("--tick-value", type=float, default=12.5, help="Currency value of one tick.")
+    g.add_argument(
+        "--tick-size",
+        type=float,
+        help="Footprint row height (NOT the exchange tick). Aim for 20-50 rows per bar.",
+    )
+    g.add_argument("--tick-value", type=float, help="Currency value of one row.")
     g.add_argument("--synthetic", action="store_true", help="Use a generated tape.")
     g.add_argument("--seed", type=int, default=7, help="Synthetic tape seed.")
     g.add_argument("--ticks", type=int, default=240_000, help="Synthetic tape length in prints.")
@@ -86,6 +114,11 @@ def _add_data_args(s: argparse.ArgumentParser) -> None:
 
 def _add_strategy_args(s: argparse.ArgumentParser) -> None:
     g = s.add_argument_group("strategy")
+    g.add_argument(
+        "--preset",
+        choices=sorted(PRESETS),
+        help="Instrument defaults (row size, fee model, sizing). Explicit flags win.",
+    )
     g.add_argument("--entry-mode", choices=ENTRY_MODES, help="Where the entry goes on candle 2.")
     g.add_argument("--regime", choices=REGIME_FILTERS, dest="regime_filter", help="Trend filter.")
     g.add_argument("--target-r", type=float, help="Target as a multiple of risk.")
@@ -95,8 +128,16 @@ def _add_strategy_args(s: argparse.ArgumentParser) -> None:
     g.add_argument("--time-stop", type=int, dest="time_stop_bars", help="Flatten after N bars.")
     g.add_argument("--risk", type=float, dest="risk_per_trade", help="Fraction of equity per trade.")
     g.add_argument("--equity", type=float, dest="starting_equity", help="Starting equity.")
-    g.add_argument("--slippage-ticks", type=float, help="Slippage per market/stop fill.")
+    g.add_argument("--slippage-ticks", type=float, help="Slippage per market/stop fill, in rows.")
+    g.add_argument(
+        "--slippage-pct", type=float, help="Slippage as a fraction of price (0.0002 = 2 bp)."
+    )
     g.add_argument("--commission", type=float, dest="commission_per_side", help="Per unit per side.")
+    g.add_argument(
+        "--commission-pct",
+        type=float,
+        help="Commission as a fraction of notional per side (0.001 = 10 bp).",
+    )
     g.add_argument("--wick-frac", type=float, help="Minimum candle-1 rejection wick fraction.")
     g.add_argument(
         "--c2-close-frac",
@@ -140,20 +181,21 @@ def config_from_args(args: argparse.Namespace) -> StrategyConfig:
         "risk_per_trade",
         "starting_equity",
         "slippage_ticks",
+        "slippage_pct",
         "commission_per_side",
+        "commission_pct",
         "wick_frac",
         "c2_close_beyond_c1_frac",
         "time_stop_bars",
         "session_start_min",
         "session_end_min",
+        "tick_size",
+        "tick_value",
     )
     for key in simple:
         value = getattr(args, key, None)
         if value is not None:
             overrides[key] = value
-
-    overrides["tick_size"] = args.tick_size
-    overrides["tick_value"] = args.tick_value
 
     if getattr(args, "partial_at_r", None) is not None:
         overrides["partial_at_r"] = args.partial_at_r if args.partial_at_r > 0 else None
@@ -168,24 +210,42 @@ def config_from_args(args: argparse.Namespace) -> StrategyConfig:
     if getattr(args, "allow_chart_levels", False):
         overrides["require_flow_backed_levels"] = False
 
+    preset = getattr(args, "preset", None)
+    if preset:
+        # Preset supplies the instrument's conventions; explicit flags win.
+        return build_preset(preset, **overrides)
     return StrategyConfig(**overrides)
 
 
-def load_bars(args: argparse.Namespace) -> List[Bar]:
+def load_bars(args: argparse.Namespace, cfg: StrategyConfig) -> List[Bar]:
+    tick = cfg.tick_size
     if args.trades:
         trades = load_trades_csv(args.trades)
         if not trades:
             raise SystemExit(f"no trades found in {args.trades}")
-        return bars_from_trades(trades, args.timeframe, args.tick_size)
+        return bars_from_trades(trades, args.timeframe, tick)
     if args.bars:
-        bars = load_bars_csv(args.bars, args.tick_size)
+        bars = load_bars_csv(args.bars, tick)
         if not bars:
             raise SystemExit(f"no bars found in {args.bars}")
         return bars
+    if getattr(args, "binance_klines", None):
+        bars = load_binance_paths(args.binance_klines, tick, kind="klines")
+        if not bars:
+            raise SystemExit("no bars found in the Binance kline archives")
+        return bars
+    if getattr(args, "binance_aggtrades", None):
+        trades = load_binance_paths(args.binance_aggtrades, tick, kind="aggTrades")
+        if not trades:
+            raise SystemExit("no trades found in the Binance aggTrades archives")
+        return bars_from_trades(trades, args.timeframe, tick)
     if args.synthetic or args.command == "demo":
-        cfg = SyntheticConfig(n_ticks=args.ticks, tick_size=args.tick_size, seed=args.seed)
-        return bars_from_trades(synthetic_trades(cfg), args.timeframe, args.tick_size)
-    raise SystemExit("provide --trades, --bars, or --synthetic")
+        sc = SyntheticConfig(n_ticks=args.ticks, tick_size=tick, seed=args.seed)
+        return bars_from_trades(synthetic_trades(sc), args.timeframe, tick)
+    raise SystemExit(
+        "provide a data source: --trades, --bars, --binance-klines, "
+        "--binance-aggtrades, or --synthetic"
+    )
 
 
 def export_trades(path: str, trades) -> None:
@@ -295,7 +355,7 @@ def cmd_demo(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
-    bars = load_bars(args)
+    bars = load_bars(args, cfg)
 
     if len(bars) < cfg.atr_period + cfg.swing_lookback + 5:
         raise SystemExit(f"not enough bars ({len(bars)}) to run the strategy")

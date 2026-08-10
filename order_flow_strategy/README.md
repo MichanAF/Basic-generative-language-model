@@ -23,6 +23,11 @@ python -m order_flow_strategy demo
 python -m order_flow_strategy backtest --trades ticks.csv --timeframe 300 \
     --tick-size 0.25 --tick-value 12.50
 
+# Two years of BTC: fetch, then run (see "Getting BTC data")
+python -m order_flow_strategy.sources.fetch --symbol BTCUSDT --interval 5m \
+    --start 2023-08 --end 2025-07 --out data/btc
+python -m order_flow_strategy backtest --binance-klines data/btc --preset btc
+
 # What the rules say about the current state of the market
 python -m order_flow_strategy scan --trades ticks.csv --timeframe 300
 
@@ -84,8 +89,8 @@ This is the part that decides whether any of this works.
 
 | Input | Flag | What you get |
 |---|---|---|
-| **Tick trades with aggressor side** | `--trades` | Everything. Real footprints, real absorption, real imbalances. |
-| OHLCV + reported buy/sell volume | `--bars` | Real delta, estimated distribution across price. Absorption detection is weak. |
+| **Tick trades with aggressor side** | `--trades`, `--binance-aggtrades` | Everything. Real footprints, real absorption, real imbalances. |
+| OHLCV + reported buy/sell volume | `--bars`, `--binance-klines` | Real delta, estimated distribution across price. Absorption detection is weak. |
 | OHLCV alone | `--bars` | A proxy. The buy/sell split is derived *from the close*, so it cannot detect absorption — the one thing this strategy is built on. |
 
 Runs on proxy data are flagged `used_proxy_footprints` and the report says so.
@@ -107,6 +112,53 @@ tick rule against quotes — do that before using this, not after.
 
 **Bars CSV**: `ts, open, high, low, close, volume`, optionally `ask_volume` and
 `bid_volume` (or `delta`), which are used when present.
+
+### Getting BTC data
+
+Binance publishes both archives this needs. Fetch them wherever outbound HTTPS
+to `data.binance.vision` is allowed:
+
+```bash
+# two years of 5m bars with measured taker-buy volume (~40 MB total)
+python -m order_flow_strategy.sources.fetch --symbol BTCUSDT --interval 5m \
+    --start 2023-08 --end 2025-07 --out data/btc
+
+python -m order_flow_strategy backtest --binance-klines data/btc --preset btc
+```
+
+Klines carry `taker_buy_base_asset_volume`, so **bar delta is measured, not
+inferred from the close** — much stronger than plain OHLCV, and small enough to
+cover years. For true footprints you need the tape:
+
+```bash
+# one month of aggTrades: real aggressor side, but 1-3 GB per month
+python -m order_flow_strategy.sources.fetch --symbol BTCUSDT --kind aggTrades \
+    --start 2025-06 --end 2025-06 --out data/btc-tape
+
+python -m order_flow_strategy backtest --binance-aggtrades data/btc-tape \
+    --preset btc --timeframe 300
+```
+
+A practical split: validate the rules across two years of klines, then confirm
+on one or two months of aggTrades that the absorption signal is really there.
+
+The readers accept `.zip` as published, `.csv`, or `.csv.gz`, with or without a
+header, and handle both the millisecond and microsecond epoch conventions
+Binance has used.
+
+### Presets
+
+`--preset btc` and `--preset es` set the instrument conventions; explicit flags
+override them. The BTC preset exists because four things differ from a futures
+contract, and each one silently invalidates a backtest if left wrong:
+
+- **Row size.** `tick_size` is the footprint row height, *not* the exchange
+  tick. BTCUSDT ticks at $0.01; at that row size a 5m bar spanning $300 has
+  30,000 rows — unreadable and ~1000x slower. The preset uses $10 rows, giving
+  20–40 rows per bar, which is what a real footprint chart shows.
+- **Fractional size** — `whole_units` off.
+- **Proportional costs** — see below.
+- **No session, 24/7** — level half-life stretched to 288 bars (24h).
 
 ---
 
@@ -245,6 +297,39 @@ In order of how much they matter:
 Do not tune everything at once. Each parameter you add to a grid raises the
 chance the best result is noise.
 
+### The cost hurdle — read this before trading BTC
+
+Costs are modelled with a fixed component (per contract, for futures) and a
+proportional one (basis points of notional, for crypto). They add, and the
+report prints the result as **cost hurdle in R per trade** — the fraction of
+your risk that fees and slippage consume before the strategy does anything.
+
+It is the most decision-relevant number in the report, because it is set by
+arithmetic rather than by skill:
+
+```
+cost_R  ≈  2 × (fee_rate + slippage_rate) × price  ÷  stop_distance
+```
+
+Tight stops make it worse, not better. At BTC $60,000 with a 0.5% stop:
+
+| Venue | Taker fee | Cost hurdle |
+|---|---|---|
+| Binance spot, base tier | 10 bp | **0.48 R per trade** |
+| USD-M futures, base tier | 4 bp | 0.24 R |
+| USD-M futures, VIP tier | 1.8 bp | 0.15 R |
+
+At 0.48 R the strategy must be right far more often than it is wrong just to
+break even — a 45% win rate at 2R gross becomes a losing system. Three things
+help, in order of effect: **trade the futures book rather than spot** (roughly
+halves it), **widen the stop** (the hurdle scales inversely with stop
+distance, and `stop_buffer_atr` is the lever), and **use a higher timeframe**
+so the stop is naturally wider relative to price.
+
+This is why the defaults are futures-shaped. A per-contract fee on ES is a few
+percent of a typical stop; a percentage fee on BTC spot with a tight stop is
+half of it.
+
 ### Risk sizing
 
 `risk_per_trade` of 0.005 (0.5%) is the default and is already aggressive for a
@@ -354,5 +439,8 @@ t-statistic, so three lucky trades cannot win.
 | `metrics.py` | Performance statistics in R multiples. |
 | `optimize.py` | Walk-forward search and recommendations. |
 | `report.py` | Human-readable output. |
+| `presets.py` | Instrument conventions (`btc`, `es`). |
+| `sources/binance.py` | Readers for Binance kline and aggTrades archives. |
+| `sources/fetch.py` | Downloader for those archives. |
 | `cli.py` | `backtest`, `optimize`, `scan`, `demo`. |
-| `tests/` | 111 unit tests, `unittest` only — no pytest required. |
+| `tests/` | 149 unit tests, `unittest` only — no pytest required. |

@@ -1,9 +1,10 @@
 import unittest
 
-from ..backtest import Backtester, _PendingEntry, _Position
+from ..backtest import Backtester, ClosedTrade, _PendingEntry, _Position
 from ..config import ENTRY_BREAK_OF_2, StrategyConfig
 from ..levels import RESISTANCE, Level
 from ..metrics import max_consecutive_losses, max_drawdown, summarize
+from ..report import warnings_for
 from ..signals import LONG, SHORT, Signal, prepare
 from .helpers import TICK, make_bar
 
@@ -281,6 +282,81 @@ class TestEndToEnd(unittest.TestCase):
         stats = summarize(Backtester(impossible).run(bars))
         self.assertEqual(stats.n_trades, 0)
         self.assertEqual(stats.expectancy_r, 0.0)
+
+
+class TestCostReporting(unittest.TestCase):
+    def test_cost_r_reports_the_hurdle_the_edge_must_clear(self):
+        # 2 point risk on 3 units at point value 50 => 300 of risk.
+        # Commission 5/unit/side => 15 in, 15 out = 30 => 0.1 R.
+        config = cfg(commission_per_side=5.0, slippage_ticks=0.0)
+        bt = Backtester(config)
+        pos = a_position(bt, config, qty=3.0)
+        bar = make_bar(ts=300, o=99.0, h=99.5, l=95.5, c=96.0)
+        closed, _ = bt._manage(pos, 1, bar, prepare([bar], config), 100_000.0)
+        self.assertAlmostEqual(closed.cost, 30.0, places=6)
+        self.assertAlmostEqual(closed.cost_r, 0.1, places=6)
+        # The cost must match what came out of the P&L.
+        self.assertAlmostEqual(closed.pnl, 4.0 * 3.0 * POINT_VALUE - closed.cost, places=6)
+
+    def test_slippage_counts_toward_cost_on_stops_but_not_on_limits(self):
+        config = cfg(slippage_ticks=2.0)  # 0.5 in price
+        bt = Backtester(config)
+
+        stopped = a_position(bt, config, qty=1.0)
+        stopped.entry_slip = 0.0  # isolate the exit leg
+        bar = make_bar(ts=300, o=101.0, h=102.5, l=100.5, c=102.0)
+        s_trade, _ = bt._manage(stopped, 1, bar, prepare([bar], config), 100_000.0)
+
+        hit = a_position(bt, config, qty=1.0)
+        hit.entry_slip = 0.0
+        bar2 = make_bar(ts=300, o=99.0, h=99.5, l=95.5, c=96.0)
+        t_trade, _ = bt._manage(hit, 1, bar2, prepare([bar2], config), 100_000.0)
+
+        self.assertGreater(s_trade.cost, 0.0, "a stop fill slips")
+        self.assertEqual(t_trade.cost, 0.0, "a limit target does not")
+
+    def test_a_percentage_fee_produces_a_large_hurdle_on_a_tight_stop(self):
+        """The BTC problem, stated as a test: 10 bp both ways on a 0.5% stop."""
+        config = StrategyConfig(
+            tick_size=10.0, tick_value=10.0, whole_units=False, slippage_ticks=0.0,
+            commission_per_side=0.0, commission_pct=0.001, partial_at_r=None,
+            time_stop_bars=None, trail_atr=None,
+        )
+        bt = Backtester(config)
+        price, risk = 60_000.0, 300.0  # 0.5% stop
+        cost = bt._commission(price, 1.0) * 2
+        self.assertAlmostEqual(cost / risk, 0.4, places=6)
+
+
+class TestRuinDetection(unittest.TestCase):
+    def test_a_wiped_out_account_is_flagged(self):
+        from ..backtest import BacktestResult
+
+        losers = [
+            ClosedTrade(
+                direction=SHORT, entry_index=i, entry_ts=0, entry_price=100.0,
+                exit_index=i, exit_ts=0, exit_price=101.0, quantity=1.0,
+                pnl=-25_000.0, r_multiple=-1.0, mae_r=1.0, mfe_r=0.0, bars_held=1,
+                exit_reason="stop", level_price=100.0, level_strength=5.0,
+            )
+            for i in range(5)
+        ]
+        result = BacktestResult(
+            trades=losers,
+            equity_curve=[100_000.0 - 25_000.0 * i for i in range(6)],
+            bar_timestamps=[0.0] * 6, signals=[], config=StrategyConfig(tick_size=TICK),
+            bars_tested=6, used_proxy_footprints=False,
+        )
+        stats = summarize(result)
+        self.assertTrue(stats.ruined)
+        self.assertEqual(stats.ruin_trade, 4, "flagged at the trade that emptied it")
+        self.assertTrue(any("wiped out" in w for w in warnings_for(stats)))
+
+    def test_a_healthy_run_is_not_flagged(self):
+        bars = TestEndToEnd()._bars()
+        stats = summarize(Backtester(StrategyConfig(tick_size=TICK)).run(bars))
+        self.assertFalse(stats.ruined)
+        self.assertGreater(stats.final_equity, 0.0)
 
 
 class TestMetrics(unittest.TestCase):
