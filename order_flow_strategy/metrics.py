@@ -50,6 +50,9 @@ class PerformanceStats:
     #: trades. The hurdle the edge must clear before a trade earns anything.
     avg_cost_r: float = 0.0
     total_costs: float = 0.0
+    #: Perp funding across all trades. Negative means paid out.
+    total_funding: float = 0.0
+    avg_funding_r: float = 0.0
     final_equity: float = 0.0
     #: True when equity was effectively wiped out during the run.
     ruined: bool = False
@@ -151,6 +154,13 @@ def summarize(result: BacktestResult) -> PerformanceStats:
 
     stats.avg_cost_r = _mean([t.cost_r for t in trades])
     stats.total_costs = sum(t.cost for t in trades)
+    stats.total_funding = sum(t.funding for t in trades)
+    risk_cash = [
+        abs(t.pnl / t.r_multiple) if t.r_multiple else 0.0 for t in trades
+    ]
+    stats.avg_funding_r = _mean(
+        [t.funding / r for t, r in zip(trades, risk_cash) if r > EPS]
+    )
 
     stats.final_equity = result.equity_curve[-1] if result.equity_curve else start
     # Fractional sizing means equity approaches zero asymptotically rather than

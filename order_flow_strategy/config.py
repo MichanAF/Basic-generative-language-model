@@ -131,6 +131,10 @@ class StrategyConfig:
     starting_equity: float = 100_000.0
     #: Round position size down to whole units (futures contracts, shares).
     whole_units: bool = True
+    #: Ceiling on notional / equity. Risk-based sizing says nothing about
+    #: leverage: a 0.5% risk budget behind a tight stop can quietly imply 5x.
+    #: Spot cannot borrow, so cap it at 1.0 there. None leaves it uncapped.
+    max_leverage: Optional[float] = None
     max_positions: int = 1
     #: Bars to wait after a loss before re-arming the same level.
     cooldown_bars: int = 5
@@ -189,6 +193,8 @@ class StrategyConfig:
             raise ValueError("cluster_frac must be in (0, 0.5]")
         if self.slippage_pct < 0 or self.commission_pct < 0:
             raise ValueError("percentage costs cannot be negative")
+        if self.max_leverage is not None and self.max_leverage <= 0:
+            raise ValueError("max_leverage must be positive, or None for uncapped")
         if not self.trade_shorts and not self.trade_longs:
             raise ValueError("at least one of trade_shorts / trade_longs must be on")
 

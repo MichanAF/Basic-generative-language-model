@@ -64,6 +64,13 @@ def format_stats(stats: PerformanceStats, title: str = "Backtest") -> str:
         f"Exits               " + ", ".join(f"{k}: {v}" for k, v in sorted(stats.exit_reasons.items())),
     ]
 
+    if stats.total_funding:
+        sign = "received" if stats.total_funding > 0 else "paid"
+        lines.append(
+            f"Perp funding        {abs(stats.total_funding):,.0f} {sign} "
+            f"({stats.avg_funding_r:+.2f} R per trade)"
+        )
+
     warnings = warnings_for(stats)
     if warnings:
         lines += [THIN, "Read this before believing any of the above:"]
@@ -78,6 +85,11 @@ def warnings_for(stats: PerformanceStats) -> List[str]:
         out.append(
             f"The account was wiped out at trade {stats.ruin_trade} of {stats.n_trades}. "
             "Everything after that point is arithmetic on a dead account, not a result."
+        )
+    if stats.avg_funding_r <= -0.15:
+        out.append(
+            f"Funding cost {abs(stats.avg_funding_r):.2f} R per trade. Long perp "
+            "exposure is being taxed; hold long-duration exposure in spot instead."
         )
     if stats.avg_cost_r >= 0.20:
         out.append(
@@ -113,6 +125,37 @@ def warnings_for(stats: PerformanceStats) -> List[str]:
             "rather than runs. A closer target may fit the behaviour better."
         )
     return out
+
+
+def format_comparison(named) -> str:
+    """Side-by-side table of several strategies on the same data.
+
+    A strategy is only ever good or bad relative to the alternatives, and the
+    cheapest alternative is doing nothing. This puts them in one place so the
+    comparison is unavoidable.
+    """
+    lines = [
+        RULE,
+        "Comparison (same data, same cost model)",
+        RULE,
+        f"{'strategy':<22}{'trades':>7}{'win%':>7}{'exp R':>8}"
+        f"{'t':>7}{'return':>10}{'maxDD':>9}{'cost R':>8}",
+        THIN,
+    ]
+    for name, st in named:
+        if st.n_trades == 0:
+            lines.append(f"{name:<22}{'-- no trades --':>46}")
+            continue
+        lines.append(
+            f"{name:<22}{st.n_trades:>7}{st.win_rate*100:>6.1f}%"
+            f"{st.expectancy_r:>+8.2f}{st.t_stat:>+7.1f}"
+            f"{st.return_pct*100:>9.1f}%{st.max_drawdown_pct*100:>8.1f}%"
+            f"{st.avg_cost_r:>8.2f}"
+        )
+    lines += [THIN, "Beating buy-and-hold on return is the bar. Beating it on", 
+              "drawdown is a different and often more achievable claim -- be", 
+              "explicit about which one you are making.", RULE, DISCLAIMER, ""]
+    return "\n".join(lines)
 
 
 def format_trades(trades: Sequence[ClosedTrade], limit: Optional[int] = 20) -> str:

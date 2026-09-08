@@ -104,7 +104,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     p.add_argument("--symbol", default="BTCUSDT")
     p.add_argument("--market", default="spot", choices=("spot", "futures/um", "futures/cm"))
-    p.add_argument("--kind", default="klines", choices=("klines", "aggTrades"))
+    p.add_argument("--kind", default="klines",
+                   choices=("klines", "aggTrades", "fundingRate"))
     p.add_argument("--interval", default="5m", help="Kline interval; ignored for aggTrades.")
     p.add_argument("--start", required=True, metavar="YYYY-MM")
     p.add_argument("--end", required=True, metavar="YYYY-MM")
@@ -116,6 +117,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"error: {exc}")
     interval = args.interval if args.kind == "klines" else None
+    market = args.market
+    if args.kind == "fundingRate" and market == "spot":
+        # Funding only exists on perpetuals; spot has no such archive.
+        market = "futures/um"
+        print("note: fundingRate is a futures series -- using futures/um\n")
     os.makedirs(args.out, exist_ok=True)
 
     if args.kind == "aggTrades":
@@ -127,14 +133,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Fetching {len(months)} month(s) of {args.symbol} {args.kind} into {args.out}")
     ok = 0
     for y, m in months:
-        url = build_url(args.market, args.kind, args.symbol, interval, y, m)
+        url = build_url(market, args.kind, args.symbol, interval, y, m)
         dest = os.path.join(args.out, url.rsplit("/", 1)[-1])
         if download(url, dest):
             ok += 1
 
     print(f"\n{ok}/{len(months)} archives available in {args.out}")
     if ok:
-        target = "--binance-klines" if args.kind == "klines" else "--binance-aggtrades"
+        target = {
+            "klines": "--binance-klines",
+            "aggTrades": "--binance-aggtrades",
+            "fundingRate": "--funding",
+        }[args.kind]
         print(
             "\nNext:\n"
             f"  python -m order_flow_strategy backtest {target} {args.out} \\\n"

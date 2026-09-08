@@ -38,6 +38,9 @@ def btc_5m(**overrides) -> StrategyConfig:
         tick_size=10.0,          # footprint row height in dollars
         tick_value=10.0,         # => point_value 1.0: one unit is one BTC
         whole_units=False,
+        # Spot cannot borrow. Raise this deliberately if you are on perps and
+        # have decided you want leverage -- do not inherit it by accident.
+        max_leverage=1.0,
         commission_per_side=0.0,
         commission_pct=BINANCE_TAKER_FEE,
         slippage_ticks=0.0,

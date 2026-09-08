@@ -29,6 +29,7 @@ from typing import Iterable, Iterator, List, Optional, Sequence
 
 from ..data import Bar, Trade
 from ..footprint import EPS, Footprint
+from ..funding import FundingSchedule
 
 #: Column order of the published kline CSVs.
 KLINE_COLUMNS = (
@@ -42,6 +43,9 @@ AGG_TRADE_COLUMNS = (
     "agg_trade_id", "price", "quantity", "first_trade_id", "last_trade_id",
     "transact_time", "is_buyer_maker", "is_best_match",
 )
+
+#: Column order of the published fundingRate CSVs (USD-M futures).
+FUNDING_COLUMNS = ("calc_time", "funding_interval_hours", "last_funding_rate")
 
 TRUE_WORDS = {"true", "t", "1", "yes"}
 
@@ -160,6 +164,27 @@ def load_binance_agg_trades(path: str) -> List[Trade]:
     return trades
 
 
+def load_binance_funding(path: str) -> FundingSchedule:
+    """Read a Binance fundingRate archive.
+
+    Rates are per settlement (typically 8-hourly), signed so that a positive
+    rate means longs pay shorts.
+    """
+    times: List[float] = []
+    rates: List[float] = []
+    for lineno, row in enumerate(_open_rows(path), start=1):
+        if lineno == 1 and _is_header(row):
+            continue
+        if len(row) < 3:
+            continue
+        try:
+            times.append(_to_seconds(float(row[0])))
+            rates.append(float(row[2]))
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"{path}:{lineno}: malformed fundingRate row") from exc
+    return FundingSchedule(times=times, rates=rates)
+
+
 def load_binance_paths(
     paths: Iterable[str],
     tick_size: float,
@@ -196,7 +221,15 @@ def load_binance_paths(
             tape.extend(load_binance_agg_trades(p))
         tape.sort(key=lambda t: t.ts)
         return tape
-    raise ValueError("kind must be 'klines' or 'aggTrades'")
+    if kind == "fundingRate":
+        times: List[float] = []
+        rates: List[float] = []
+        for p in sorted(expanded):
+            sched = load_binance_funding(p)
+            times.extend(sched.times)
+            rates.extend(sched.rates)
+        return FundingSchedule(times=times, rates=rates)
+    raise ValueError("kind must be 'klines', 'aggTrades' or 'fundingRate'")
 
 
 def _dedupe(rows: Sequence, key) -> List:

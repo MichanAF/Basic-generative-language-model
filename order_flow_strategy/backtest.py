@@ -20,6 +20,7 @@ from typing import List, Optional, Sequence
 from .config import ENTRY_BREAK_OF_2, StrategyConfig
 from .data import Bar
 from .footprint import EPS
+from .funding import FundingSchedule
 from .levels import Level
 from .signals import SHORT, Indicators, Signal, SignalEngine, prepare
 
@@ -44,6 +45,8 @@ class ClosedTrade:
     level_strength: float
     #: Commission plus slippage actually paid, in currency.
     cost: float = 0.0
+    #: Perp funding over the life of the trade. Negative means you paid.
+    funding: float = 0.0
     #: Those costs expressed as a fraction of the risk taken. This is the
     #: hurdle the edge has to clear before the trade makes anything, and on a
     #: percentage-fee venue with a tight stop it can approach 0.5.
@@ -76,6 +79,10 @@ class _Position:
     entry_slip: float = 0.0
     #: Commission and slippage paid so far, in currency.
     cost_cash: float = 0.0
+    #: Funding settled so far. Negative means paid out.
+    funding_cash: float = 0.0
+    #: Timestamp funding was last accrued up to.
+    last_funding_ts: float = 0.0
 
     def excursions(self) -> tuple:
         """``(mae_r, mfe_r)`` from the recorded price extremes."""
@@ -115,10 +122,24 @@ class Backtester:
     def __init__(self, cfg: StrategyConfig):
         self.cfg = cfg
         self.point_value = cfg.tick_value / cfg.tick_size
+        self.funding: Optional[FundingSchedule] = None
 
     # ------------------------------------------------------------------
-    def run(self, bars: Sequence[Bar], indicators: Optional[Indicators] = None) -> BacktestResult:
+    def run(
+        self,
+        bars: Sequence[Bar],
+        indicators: Optional[Indicators] = None,
+        funding: Optional[FundingSchedule] = None,
+    ) -> BacktestResult:
+        """``funding`` charges perp settlements against open positions.
+
+        Leave it None for spot, where there is no funding leg. Supplying it
+        matters: a long held through a year of baseline funding pays roughly
+        11%, which is easily the difference between a viable strategy and one
+        that only looked viable.
+        """
         cfg = self.cfg
+        self.funding = funding
         ind = indicators or prepare(bars, cfg)
         engine = SignalEngine(cfg)
 
@@ -204,21 +225,52 @@ class Backtester:
     # ------------------------------------------------------------------
     # Entry
     # ------------------------------------------------------------------
-    def _size(self, risk_per_unit: float, equity: float) -> float:
+    def _size(
+        self, risk_per_unit: float, equity: float, price: Optional[float] = None
+    ) -> float:
+        """Risk-based size, capped by ``max_leverage`` when a price is known."""
         cfg = self.cfg
         risk_cash = equity * cfg.risk_per_trade
         per_unit = max(risk_per_unit * self.point_value, EPS)
         qty = risk_cash / per_unit
+
+        if cfg.max_leverage is not None and price:
+            notional_per_unit = abs(price) * self.point_value
+            if notional_per_unit > EPS:
+                qty = min(qty, equity * cfg.max_leverage / notional_per_unit)
+
         if cfg.whole_units:
             qty = float(int(qty))
         return max(qty, 0.0)
+
+    def _accrue_funding(self, pos: "_Position", bar: Bar) -> float:
+        """Settle funding due since the last accrual. Returns the cash flow."""
+        if self.funding is None or self.funding.is_empty:
+            return 0.0
+        notional = abs(pos.quantity) * bar.close * self.point_value
+        flow = self.funding.cash_flow(
+            pos.direction, notional, pos.last_funding_ts, bar.ts
+        )
+        pos.last_funding_ts = bar.ts
+        if flow == 0.0:
+            return 0.0
+        pos.funding_cash += flow
+        pos.cost_cash -= flow  # a payment is a cost; a receipt offsets one
+        return flow
 
     def _slippage(self, price: float) -> float:
         """Fixed plus proportional slippage, in price units."""
         cfg = self.cfg
         return cfg.slippage_ticks * cfg.tick_size + cfg.slippage_pct * abs(price)
 
-    def _open(self, sig: Signal, index: int, raw_price: float, equity: float) -> Optional[_Position]:
+    def _open(
+        self,
+        sig: Signal,
+        index: int,
+        raw_price: float,
+        equity: float,
+        entry_ts: Optional[float] = None,
+    ) -> Optional[_Position]:
         cfg = self.cfg
         slip = self._slippage(raw_price)
         fill = raw_price - slip if sig.direction == SHORT else raw_price + slip
@@ -226,7 +278,7 @@ class Backtester:
         risk = (sig.stop - fill) if sig.direction == SHORT else (fill - sig.stop)
         if risk <= 0:
             return None
-        qty = self._size(risk, equity)
+        qty = self._size(risk, equity, price=fill)
         if qty <= 0:
             return None  # account too small to take this trade at this risk
 
@@ -246,6 +298,7 @@ class Backtester:
             best_price=fill,
             worst_price=fill,
             entry_slip=slip,
+            last_funding_ts=sig.ts if entry_ts is None else entry_ts,
         )
 
     def _pending_invalidated(self, pending: _PendingEntry, bar: Bar) -> bool:
@@ -268,7 +321,7 @@ class Backtester:
             if bar.high < trigger:
                 return None
             raw = max(bar.open, trigger)
-        return self._open(sig, index, raw, equity)
+        return self._open(sig, index, raw, equity, entry_ts=bar.ts)
 
     # ------------------------------------------------------------------
     # Management
@@ -283,6 +336,7 @@ class Backtester:
         same_bar_entry: bool = False,
     ):
         cfg = self.cfg
+        equity += self._accrue_funding(pos, bar)
 
         if pos.direction == SHORT:
             pos.best_price = min(pos.best_price, bar.low)
@@ -400,7 +454,7 @@ class Backtester:
     ):
         pnl_leg = self._pnl(pos.direction, pos.entry_price, fill, pos.quantity)
         equity += pnl_leg
-        total_pnl = pos.realized + pnl_leg
+        total_pnl = pos.realized + pnl_leg + pos.funding_cash
         pos.cost_cash += self._leg_cost(pos, fill, pos.quantity, exit_slip)
 
         risk_cash = pos.risk_per_unit * pos.initial_quantity * self.point_value
@@ -425,6 +479,7 @@ class Backtester:
             level_strength=pos.level.strength,
             cost=pos.cost_cash,
             cost_r=pos.cost_cash / risk_cash if risk_cash > EPS else 0.0,
+            funding=pos.funding_cash,
             reasons=list(pos.signal.reasons),
         )
         return trade, equity

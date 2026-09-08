@@ -33,7 +33,16 @@ from .optimize import DEFAULT_GRID, FAST_GRID, format_recommendation, walk_forwa
 from .presets import PRESETS
 from .presets import build as build_preset
 from .sources import load_binance_paths
-from .report import DISCLAIMER, format_levels, format_signal, format_stats, format_trades
+from .baselines import buy_and_hold, trend_baseline
+from .funding import FundingSchedule
+from .report import (
+    DISCLAIMER,
+    format_comparison,
+    format_levels,
+    format_signal,
+    format_stats,
+    format_trades,
+)
 from .signals import SignalEngine, prepare
 
 
@@ -50,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("optimize", "Walk-forward parameter search and recommendations."),
         ("scan", "Show live levels and any setup on the most recent bar."),
         ("demo", "Generate a synthetic tape and run everything on it."),
+        ("compare", "Run the strategy against trend-following and buy-and-hold."),
     ):
         s = sub.add_parser(name, help=help_text, description=help_text)
         _add_data_args(s)
@@ -65,11 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
                 default=15,
                 help="Trades a fold must produce to be rankable (default 15).",
             )
-        if name in ("backtest", "demo"):
+        if name in ("backtest", "demo", "compare"):
             s.add_argument(
                 "--show-trades", type=int, default=20, help="Trade rows to print (0 for all)."
             )
             s.add_argument("--export-trades", metavar="PATH", help="Write trades to CSV.")
+        if name == "compare":
+            s.add_argument(
+                "--sma", type=int, default=200,
+                help="Moving average period for the trend baseline (default 200).",
+            )
         if name in ("scan", "demo"):
             s.add_argument(
                 "--show-levels", type=int, default=10, help="Level rows to print (default 10)."
@@ -94,6 +109,13 @@ def _add_data_args(s: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Binance monthly aggTrades .zip/.csv files or a directory. "
         "The real tape, giving true footprints.",
+    )
+    g.add_argument(
+        "--funding",
+        nargs="+",
+        metavar="PATH",
+        help="Binance fundingRate .zip/.csv files or a directory. Charges perp "
+        "funding against open positions. Omit for spot.",
     )
     g.add_argument(
         "--timeframe",
@@ -217,6 +239,17 @@ def config_from_args(args: argparse.Namespace) -> StrategyConfig:
     return StrategyConfig(**overrides)
 
 
+def load_funding(args: argparse.Namespace, cfg: StrategyConfig) -> Optional[FundingSchedule]:
+    paths = getattr(args, "funding", None)
+    if not paths:
+        return None
+    sched = load_binance_paths(paths, cfg.tick_size, kind="fundingRate")
+    if sched.is_empty:
+        raise SystemExit("no funding settlements found in the given paths")
+    print(f"Funding: {sched.summary()}\n")
+    return sched
+
+
 def load_bars(args: argparse.Namespace, cfg: StrategyConfig) -> List[Bar]:
     tick = cfg.tick_size
     if args.trades:
@@ -273,7 +306,7 @@ def export_trades(path: str, trades) -> None:
 
 
 def cmd_backtest(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> None:
-    result = Backtester(cfg).run(bars)
+    result = Backtester(cfg).run(bars, funding=load_funding(args, cfg))
     stats = summarize(result)
     print(format_stats(stats, title=f"Backtest over {len(bars)} bars"))
     limit = None if args.show_trades == 0 else args.show_trades
@@ -352,6 +385,28 @@ def cmd_demo(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> 
         print(f"Wrote {len(result.trades)} trades to {args.export_trades}\n")
 
 
+def cmd_compare(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> None:
+    """The order-flow strategy next to the two things it has to beat."""
+    funding = load_funding(args, cfg)
+    if len(bars) <= args.sma + 10:
+        print(
+            f"WARNING: {len(bars)} bars against an SMA{args.sma} leaves "
+            f"{max(0, len(bars)-args.sma)} tradeable -- expect a handful of trades\n"
+            "and no statistical meaning. Use a longer history for the trend leg.\n"
+        )
+
+    rows = []
+    of = summarize(Backtester(cfg).run(bars, funding=funding))
+    rows.append(("order flow (2-candle)", of))
+    if len(bars) > args.sma + 2:
+        rows.append((f"trend SMA{args.sma}", summarize(trend_baseline(bars, cfg, args.sma, funding=funding))))
+    rows.append(("buy and hold", summarize(buy_and_hold(bars, cfg))))
+
+    print(format_comparison(rows))
+    for name, st in rows:
+        print(format_stats(st, title=name))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
@@ -368,6 +423,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cmd_scan(args, bars, cfg)
     elif args.command == "demo":
         cmd_demo(args, bars, cfg)
+    elif args.command == "compare":
+        cmd_compare(args, bars, cfg)
     return 0
 
 
