@@ -34,6 +34,13 @@ python -m order_flow_strategy scan --trades ticks.csv --timeframe 300
 # Walk-forward search, with recommendations and the caveats attached
 python -m order_flow_strategy optimize --trades ticks.csv --folds 4
 
+# Compare against the benchmarks it has to beat
+python -m order_flow_strategy compare --binance-klines data/btc --preset btc
+
+# ...or write the whole thing out as one HTML page
+python -m order_flow_strategy report --binance-klines data/btc --preset btc \
+    --out report.html
+
 # Tests
 python -m unittest discover -s order_flow_strategy/tests -t .
 ```
@@ -439,8 +446,12 @@ t-statistic, so three lucky trades cannot win.
 | `metrics.py` | Performance statistics in R multiples. |
 | `optimize.py` | Walk-forward search and recommendations. |
 | `report.py` | Human-readable output. |
+| `funding.py` | Perp funding settlements and their cash flows. |
+| `baselines.py` | Trend-following and buy-and-hold benchmarks. |
+| `confluence.py` | Which signal conditions actually earn their place. |
+| `reporting_html.py` | Self-contained HTML report. |
 | `presets.py` | Instrument conventions (`btc`, `es`). |
 | `sources/binance.py` | Readers for Binance kline and aggTrades archives. |
 | `sources/fetch.py` | Downloader for those archives. |
-| `cli.py` | `backtest`, `optimize`, `scan`, `demo`. |
-| `tests/` | 149 unit tests, `unittest` only — no pytest required. |
+| `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`. |
+| `tests/` | 197 unit tests, `unittest` only — no pytest required. |

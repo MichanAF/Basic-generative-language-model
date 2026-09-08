@@ -34,6 +34,9 @@ from .presets import PRESETS
 from .presets import build as build_preset
 from .sources import load_binance_paths
 from .baselines import buy_and_hold, trend_baseline
+from .confluence import analyse as analyse_confluence
+from .confluence import format_confluence
+from .reporting_html import build_report
 from .funding import FundingSchedule
 from .report import (
     DISCLAIMER,
@@ -60,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("scan", "Show live levels and any setup on the most recent bar."),
         ("demo", "Generate a synthetic tape and run everything on it."),
         ("compare", "Run the strategy against trend-following and buy-and-hold."),
+        ("report", "Write a self-contained HTML report of the whole comparison."),
     ):
         s = sub.add_parser(name, help=help_text, description=help_text)
         _add_data_args(s)
@@ -75,16 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
                 default=15,
                 help="Trades a fold must produce to be rankable (default 15).",
             )
-        if name in ("backtest", "demo", "compare"):
+        if name in ("backtest", "demo", "compare", "report"):
             s.add_argument(
                 "--show-trades", type=int, default=20, help="Trade rows to print (0 for all)."
             )
             s.add_argument("--export-trades", metavar="PATH", help="Write trades to CSV.")
-        if name == "compare":
+        if name in ("compare", "report"):
             s.add_argument(
                 "--sma", type=int, default=200,
                 help="Moving average period for the trend baseline (default 200).",
             )
+        if name == "report":
+            s.add_argument("--out", default="report.html", metavar="PATH",
+                           help="Where to write the page (default report.html).")
+            s.add_argument("--title", default="BTC Strategy Report")
         if name in ("scan", "demo"):
             s.add_argument(
                 "--show-levels", type=int, default=10, help="Level rows to print (default 10)."
@@ -396,15 +404,40 @@ def cmd_compare(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) 
         )
 
     rows = []
-    of = summarize(Backtester(cfg).run(bars, funding=funding))
-    rows.append(("order flow (2-candle)", of))
+    of_result = Backtester(cfg).run(bars, funding=funding)
+    rows.append(("order flow (2-candle)", summarize(of_result)))
     if len(bars) > args.sma + 2:
         rows.append((f"trend SMA{args.sma}", summarize(trend_baseline(bars, cfg, args.sma, funding=funding))))
     rows.append(("buy and hold", summarize(buy_and_hold(bars, cfg))))
 
     print(format_comparison(rows))
+    print(format_confluence(analyse_confluence(of_result.trades)))
     for name, st in rows:
         print(format_stats(st, title=name))
+
+
+def _run_all(args, bars, cfg):
+    """The three strategies plus the confluence analysis, in one place."""
+    funding = load_funding(args, cfg)
+    of_result = Backtester(cfg).run(bars, funding=funding)
+    sections = [("Order flow", of_result, summarize(of_result))]
+    if len(bars) > args.sma + 2:
+        tr = trend_baseline(bars, cfg, args.sma, funding=funding)
+        sections.append((f"Trend SMA{args.sma}", tr, summarize(tr)))
+    bh = buy_and_hold(bars, cfg)
+    sections.append(("Buy and hold", bh, summarize(bh)))
+    return sections, analyse_confluence(of_result.trades)
+
+
+def cmd_report(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> None:
+    sections, conf = _run_all(args, bars, cfg)
+    note = "synthetic data" if getattr(args, "synthetic", False) else ""
+    page = build_report(sections, cfg, confluence=conf, title=args.title, data_note=note)
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    print(format_confluence(conf))
+    print(f"Wrote {len(page):,} bytes to {args.out}")
+    print("Open it in a browser, or publish it wherever your team reads things.")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -425,6 +458,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cmd_demo(args, bars, cfg)
     elif args.command == "compare":
         cmd_compare(args, bars, cfg)
+    elif args.command == "report":
+        cmd_report(args, bars, cfg)
     return 0
 
 

@@ -37,6 +37,30 @@ from .levels import RESISTANCE, SUPPORT, Level, LevelBook, detect_delta_divergen
 SHORT = -1
 LONG = 1
 
+#: Maps a phrase the engine writes into a signal's reasons onto a short tag.
+#: Tags are what the confluence analysis groups by, so the mapping lives in one
+#: place rather than being re-derived by string matching downstream.
+TAG_KEYWORDS = (
+    ("absorption", "absorption"),
+    ("stacked sell imbalances", "imbalance_stack"),
+    ("stacked buy imbalances", "imbalance_stack"),
+    ("delta_divergence", "delta_divergence"),
+    ("high_volume_node", "high_volume_node"),
+    ("retest_hold", "retest_hold"),
+    ("polarity_flip", "polarity_flip"),
+    ("wick", "wick_rejection"),
+)
+
+
+def tags_from_reasons(reasons) -> List[str]:
+    """Condition tags present in a signal's reason list, de-duplicated."""
+    blob = " | ".join(reasons).lower()
+    seen: List[str] = []
+    for phrase, tag in TAG_KEYWORDS:
+        if phrase.lower() in blob and tag not in seen:
+            seen.append(tag)
+    return seen
+
 
 @dataclass
 class Indicators:
@@ -93,6 +117,8 @@ class Signal:
     atr: float
     entry_mode: str
     reasons: List[str] = field(default_factory=list)
+    #: Condition tags that were present when this signal fired.
+    tags: List[str] = field(default_factory=list)
 
     @property
     def r_multiple_target(self) -> float:
@@ -393,6 +419,7 @@ class SignalEngine:
             atr=atr_value,
             entry_mode=cfg.entry_mode,
             reasons=setup.reasons + reasons,
+            tags=tags_from_reasons(setup.reasons + reasons),
         )
 
     # ------------------------------------------------------------------

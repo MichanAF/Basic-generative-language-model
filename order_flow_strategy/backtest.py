@@ -47,6 +47,8 @@ class ClosedTrade:
     cost: float = 0.0
     #: Perp funding over the life of the trade. Negative means you paid.
     funding: float = 0.0
+    #: Condition tags from the signal that opened this trade.
+    tags: List[str] = field(default_factory=list)
     #: Those costs expressed as a fraction of the risk taken. This is the
     #: hurdle the edge has to clear before the trade makes anything, and on a
     #: percentage-fee venue with a tight stop it can approach 0.5.
@@ -480,6 +482,7 @@ class Backtester:
             cost=pos.cost_cash,
             cost_r=pos.cost_cash / risk_cash if risk_cash > EPS else 0.0,
             funding=pos.funding_cash,
+            tags=list(pos.signal.tags),
             reasons=list(pos.signal.reasons),
         )
         return trade, equity
