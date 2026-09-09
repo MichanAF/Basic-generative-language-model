@@ -22,7 +22,7 @@ model, same R multiples, same warnings.
 
 from typing import List, Optional, Sequence
 
-from .backtest import BacktestResult, Backtester, ClosedTrade
+from .backtest import BacktestResult, Backtester, ClosedTrade, OpenPosition
 from .config import StrategyConfig
 from .data import Bar
 from .footprint import EPS
@@ -102,6 +102,7 @@ def trend_baseline(
     sma_period: int = 200,
     size_mode: str = SIZE_RISK,
     funding: Optional[FundingSchedule] = None,
+    flatten_at_end: bool = True,
 ) -> BacktestResult:
     """Long while close > SMA, flat otherwise. Long-only, no shorts.
 
@@ -187,7 +188,14 @@ def trend_baseline(
             mark += (bar.close - entry_price) * qty * bt.point_value
         curve.append(mark)
 
-    if open_i is not None:
+    still_open: Optional[OpenPosition] = None
+    if open_i is not None and not flatten_at_end:
+        still_open = OpenPosition(
+            direction=LONG, entry_index=open_i, entry_ts=bars[open_i].ts,
+            entry_price=entry_price, quantity=qty,
+            stop=entry_price - risk_per_unit, target=0.0,
+        )
+    elif open_i is not None:
         last = len(bars) - 1
         bar = bars[last]
         fill = bar.close - bt._slippage(bar.close)
@@ -209,6 +217,7 @@ def trend_baseline(
         config=cfg,
         bars_tested=len(bars),
         used_proxy_footprints=any(b.footprint.is_proxy for b in bars),
+        open_position=still_open,
     )
 
 

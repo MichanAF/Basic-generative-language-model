@@ -106,6 +106,24 @@ class _PendingEntry:
 
 
 @dataclass
+class OpenPosition:
+    """A position still live when the data ran out.
+
+    Only populated when ``flatten_at_end=False``. Paper and live trading need
+    to know what the rules say you should be holding *right now*; a backtest
+    that always force-closes at the last bar destroys exactly that signal.
+    """
+
+    direction: int
+    entry_index: int
+    entry_ts: float
+    entry_price: float
+    quantity: float
+    stop: float
+    target: float
+
+
+@dataclass
 class BacktestResult:
     trades: List[ClosedTrade]
     equity_curve: List[float]
@@ -114,6 +132,8 @@ class BacktestResult:
     config: StrategyConfig
     bars_tested: int
     used_proxy_footprints: bool
+    #: Set when the run ended holding something and was told not to flatten.
+    open_position: Optional[OpenPosition] = None
 
     @property
     def final_equity(self) -> float:
@@ -132,6 +152,7 @@ class Backtester:
         bars: Sequence[Bar],
         indicators: Optional[Indicators] = None,
         funding: Optional[FundingSchedule] = None,
+        flatten_at_end: bool = True,
     ) -> BacktestResult:
         """``funding`` charges perp settlements against open positions.
 
@@ -197,8 +218,20 @@ class Backtester:
 
             curve.append(self._mark_to_market(equity, position, bar))
 
-        # Flatten anything still open at the end of the data.
-        if position is not None:
+        # Flatten anything still open at the end of the data, unless the caller
+        # wants to know what is still held -- paper and live trading do.
+        still_open: Optional[OpenPosition] = None
+        if position is not None and not flatten_at_end:
+            still_open = OpenPosition(
+                direction=position.direction,
+                entry_index=position.entry_index,
+                entry_ts=position.signal.ts,
+                entry_price=position.entry_price,
+                quantity=position.quantity,
+                stop=position.stop,
+                target=position.target,
+            )
+        elif position is not None:
             last_i = len(bars) - 1
             final_close = bars[last_i].close
             closed, equity = self._close(
@@ -222,6 +255,7 @@ class Backtester:
             config=cfg,
             bars_tested=len(bars),
             used_proxy_footprints=any(b.footprint.is_proxy for b in bars),
+            open_position=still_open,
         )
 
     # ------------------------------------------------------------------

@@ -5,6 +5,10 @@
     python -m order_flow_strategy backtest --binance-klines data/btc --preset btc
     python -m order_flow_strategy optimize --bars bars.csv --folds 4
     python -m order_flow_strategy scan --trades ticks.csv --timeframe 300
+    python -m order_flow_strategy paper --binance-klines data/btc --preset btc
+
+``paper`` is the one meant to run on a schedule. It keeps its book on disk,
+processes each bar exactly once, and places no orders.
 
 Fetching Binance archives is a separate step, since it is the only part that
 needs the network:
@@ -16,6 +20,7 @@ needs the network:
 import argparse
 import csv
 import sys
+import time
 from typing import List, Optional, Sequence
 
 from .backtest import Backtester
@@ -38,6 +43,7 @@ from .confluence import analyse as analyse_confluence
 from .confluence import format_confluence
 from .reporting_html import build_report
 from .funding import FundingSchedule
+from .paper import PaperTrader
 from .report import (
     DISCLAIMER,
     format_comparison,
@@ -64,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("demo", "Generate a synthetic tape and run everything on it."),
         ("compare", "Run the strategy against trend-following and buy-and-hold."),
         ("report", "Write a self-contained HTML report of the whole comparison."),
+        ("paper", "Forward-test against fresh bars, keeping state on disk."),
     ):
         s = sub.add_parser(name, help=help_text, description=help_text)
         _add_data_args(s)
@@ -96,6 +103,23 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("scan", "demo"):
             s.add_argument(
                 "--show-levels", type=int, default=10, help="Level rows to print (default 10)."
+            )
+        if name == "paper":
+            s.add_argument(
+                "--state", default="paper/state.json", metavar="PATH",
+                help="Where the position and equity live between runs.",
+            )
+            s.add_argument(
+                "--journal", default="paper/journal.jsonl", metavar="PATH",
+                help="Append-only record of every decision.",
+            )
+            s.add_argument(
+                "--status-only", action="store_true",
+                help="Print the current book without processing new bars.",
+            )
+            s.add_argument(
+                "--show-journal", type=int, default=10, metavar="N",
+                help="Print the last N journal entries (0 for none).",
             )
     return p
 
@@ -440,6 +464,51 @@ def cmd_report(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -
     print("Open it in a browser, or publish it wherever your team reads things.")
 
 
+def cmd_paper(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> None:
+    """Forward-test: replay the engine, act on the difference, place nothing.
+
+    Designed to be run repeatedly from a scheduler. Processing the same bars
+    twice is a no-op, so a retrying cron job cannot double a position.
+    """
+    trader = PaperTrader(
+        cfg,
+        state_path=args.state,
+        journal_path=args.journal,
+        funding=load_funding(args, cfg),
+    )
+
+    if args.status_only:
+        print(trader.status(bars[-1].close if bars else None))
+    else:
+        decisions = trader.update(bars)
+        if not decisions:
+            print(
+                f"Nothing new. Newest bar is already processed "
+                f"({len(bars):,} bars seen).\n"
+            )
+        else:
+            print(f"{len(decisions)} decision(s) on the newest bar:\n")
+            for d in decisions:
+                print(f"  {d.action:<11} {d.reason}")
+            print()
+        print(trader.status(bars[-1].close if bars else None))
+
+    if args.show_journal:
+        entries = trader.read_journal()[-args.show_journal :]
+        if entries:
+            print(f"Last {len(entries)} journal entries:")
+            for e in entries:
+                when = time.strftime(
+                    "%Y-%m-%d %H:%M", time.gmtime(e.get("bar_ts", 0))
+                )
+                print(
+                    f"  {when}  {e.get('action', '?'):<11} "
+                    f"{e.get('reason', '')}"
+                )
+            print()
+    print(DISCLAIMER)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
@@ -460,6 +529,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cmd_compare(args, bars, cfg)
     elif args.command == "report":
         cmd_report(args, bars, cfg)
+    elif args.command == "paper":
+        cmd_paper(args, bars, cfg)
     return 0
 
 

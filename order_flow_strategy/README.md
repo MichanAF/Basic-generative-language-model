@@ -41,6 +41,9 @@ python -m order_flow_strategy compare --binance-klines data/btc --preset btc
 python -m order_flow_strategy report --binance-klines data/btc --preset btc \
     --out report.html
 
+# Forward-test on a schedule: keeps a book on disk, places no orders
+python -m order_flow_strategy paper --binance-klines data/btc --preset btc
+
 # Tests
 python -m unittest discover -s order_flow_strategy/tests -t .
 ```
@@ -357,8 +360,52 @@ wrong.
 4. Check the in-sample versus out-of-sample gap. A large gap means the search
    found nothing real.
 5. Forward-test on live data with no money for a month. Compare the fills you
-   would have gotten with the fills the backtest assumed.
+   would have gotten with the fills the backtest assumed. `paper` does this —
+   see below.
 6. Only then, size up slowly.
+
+### Forward-testing with `paper`
+
+Forward tests cost calendar time, so start one before the backtest verdict is
+in rather than after. It runs against fresh bars, keeps its book on disk, and
+places nothing.
+
+```bash
+# Run it on a schedule. Once per bar close is enough.
+python -m order_flow_strategy paper --binance-klines data/btc --preset btc \
+    --state paper/state.json --journal paper/journal.jsonl
+
+# Look at the book without touching it
+python -m order_flow_strategy paper --binance-klines data/btc --preset btc \
+    --status-only
+```
+
+It does not re-implement the trading rules. It replays the same engine over the
+same bars, asks what position should be held *now*, and acts on the difference
+against what it holds — reconciliation by construction, the same shape as
+reconciling a live bot against an exchange. A second implementation could
+silently disagree with the backtest and you would never know which was right.
+
+Equity is read off the engine's curve for the same reason, and closed trades
+are journalled with the engine's exit price and reason rather than a
+close-price guess.
+
+Three properties make it safe to schedule:
+
+- **Restart safety.** State is on disk. A process that dies holding a position
+  knows what it holds when it comes back. A corrupt state file raises rather
+  than resetting — silently forgetting an open position is the worst available
+  failure.
+- **Idempotency.** Bars are processed once, keyed on timestamp. A retrying cron
+  job cannot double a position.
+- **An audit trail.** Every decision appends to a JSONL journal, including the
+  ones that do nothing. Actions are `open_long`, `open_short`, `close`,
+  `adjust`, `hold`, `no_signal`.
+
+Pass the **full** bar history on every run, not a rolling window. The engine
+restarts from `starting_equity` on each replay, so a shortened history rebases
+the equity curve; the tool warns when the history it is handed is shorter than
+the one before.
 
 ### When not to take the setup
 
@@ -450,8 +497,9 @@ t-statistic, so three lucky trades cannot win.
 | `baselines.py` | Trend-following and buy-and-hold benchmarks. |
 | `confluence.py` | Which signal conditions actually earn their place. |
 | `reporting_html.py` | Self-contained HTML report. |
+| `paper.py` | Forward testing by reconciliation; state, journal, restart safety. |
 | `presets.py` | Instrument conventions (`btc`, `es`). |
 | `sources/binance.py` | Readers for Binance kline and aggTrades archives. |
 | `sources/fetch.py` | Downloader for those archives. |
-| `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`. |
-| `tests/` | 197 unit tests, `unittest` only — no pytest required. |
+| `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`, `paper`. |
+| `tests/` | 228 unit tests, `unittest` only — no pytest required. |

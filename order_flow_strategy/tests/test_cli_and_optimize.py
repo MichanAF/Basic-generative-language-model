@@ -244,6 +244,40 @@ class TestCliCommands(unittest.TestCase):
                 header = fh.readline()
         self.assertIn("r_multiple", header)
 
+    def test_paper_creates_a_book_and_is_safe_to_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, "paper", "state.json")
+            journal = os.path.join(tmp, "paper", "journal.jsonl")
+            argv = [
+                "paper", "--synthetic", "--ticks", "60000",
+                "--state", state, "--journal", journal,
+            ]
+            code, out = self._run(argv)
+            self.assertEqual(code, 0)
+            self.assertIn("Paper trading status", out)
+            self.assertIn("No orders are placed", out)
+            self.assertTrue(os.path.exists(state))
+
+            # A scheduler that fires twice on the same data must not act twice.
+            with open(journal, encoding="utf-8") as fh:
+                first = fh.read()
+            code, out = self._run(argv)
+            self.assertEqual(code, 0)
+            self.assertIn("Nothing new", out)
+            with open(journal, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), first)
+
+    def test_paper_status_only_does_not_process_bars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, "state.json")
+            code, out = self._run(
+                ["paper", "--synthetic", "--ticks", "60000", "--state", state,
+                 "--journal", os.path.join(tmp, "j.jsonl"), "--status-only"]
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("none yet", out)
+            self.assertFalse(os.path.exists(state))
+
     def test_requires_a_data_source(self):
         with self.assertRaises(SystemExit):
             self._run(["backtest"])

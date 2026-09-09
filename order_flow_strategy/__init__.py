@@ -21,8 +21,9 @@ from .data import Bar, Trade, bars_from_trades, load_bars_csv, load_trades_csv
 from .footprint import Footprint
 from .levels import Level, LevelBook
 from .signals import Setup, Signal, SignalEngine
-from .backtest import Backtester, BacktestResult, ClosedTrade
+from .backtest import Backtester, BacktestResult, ClosedTrade, OpenPosition
 from .metrics import PerformanceStats, summarize
+from .paper import Decision, PaperState, PaperTrader
 
 __all__ = [
     "StrategyConfig",
@@ -37,8 +38,12 @@ __all__ = [
     "Backtester",
     "BacktestResult",
     "ClosedTrade",
+    "OpenPosition",
     "PerformanceStats",
     "summarize",
+    "PaperTrader",
+    "PaperState",
+    "Decision",
     "bars_from_trades",
     "load_bars_csv",
     "load_trades_csv",
