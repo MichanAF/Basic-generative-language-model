@@ -44,6 +44,10 @@ python -m order_flow_strategy report --binance-klines data/btc --preset btc \
 # Forward-test on a schedule: keeps a book on disk, places no orders
 python -m order_flow_strategy paper --binance-klines data/btc --preset btc
 
+# The set-and-forget core: spot, binary exposure, one parameter
+python -m order_flow_strategy autopilot --synthetic --days 2000
+python -m order_flow_strategy autopilot --binance-klines data/btc-daily --preset btc
+
 # Tests
 python -m unittest discover -s order_flow_strategy/tests -t .
 ```
@@ -364,6 +368,120 @@ wrong.
    see below.
 6. Only then, size up slowly.
 
+---
+
+## `autopilot` — the set-and-forget strategy
+
+The order-flow strategy is **not** a set-and-forget system. It needs tick data,
+its cost hurdle eats roughly half its own risk on a percentage-fee venue, and it
+would want revalidating every few months. It is a high-touch system wearing a
+bot costume.
+
+`autopilot` is the opposite, and the two are meant to coexist: this is the core
+holding, the order-flow work is a satellite that has to earn its way in.
+
+### The rule
+
+Hold spot BTC while price closes above a long moving average. Hold nothing
+otherwise. One number to choose, and you will not tune it.
+
+```bash
+# See what it would have done
+python -m order_flow_strategy autopilot --binance-klines data/btc-daily --preset btc
+
+# Run it forward on a daily schedule, book on disk, no orders placed
+python -m order_flow_strategy autopilot --live \
+    --binance-klines data/btc-daily --preset btc
+
+# Look without touching
+python -m order_flow_strategy autopilot --live --status-only \
+    --binance-klines data/btc-daily --preset btc
+```
+
+### Three decisions, and why
+
+**Binary exposure, not risk-based sizing.** A trend filter risking 0.5% per
+signal and firing six times a year puts about 0.9% of the account at stake
+annually. That is not an investment strategy, it is a rounding error with a cron
+job. For a slow compounder the position *is* the account: fully in, or fully
+out. That is also why compounding works here — each risk-on period puts the
+grown equity to work, not a fixed fraction of it.
+
+**Spot, not perp.** Funding at a baseline 0.01% per eight-hour settlement is
+11.6% a year against a position held through a trend, and 0.05% is 72.8%.
+Liquidation turns a survivable drawdown into a permanent loss. Neither risk buys
+a set-and-forget core anything. Run a leveraged sleeve separately and
+deliberately, if at all.
+
+**Hysteresis, not a bare crossover.** Price must close a set fraction past the
+average to flip the regime, so a market oscillating around the line does not
+generate a trade per bar. Whipsaw, not trend accuracy, is what kills
+moving-average systems. On generated data a 3% band cut regime flips from 18 to
+10 over the same path.
+
+### The safety rails, and the principle behind them
+
+**A rail may block getting in. No rail may block getting out.** Being kept out
+costs opportunity. Being kept in costs money — and the moments a rail is most
+likely to misfire, a data gap or a violent bar or an outage, are exactly the
+moments you most want the exit available.
+
+| Rail | Blocks | Why |
+|---|---|---|
+| `warmup` | entry | The average is not populated yet |
+| `min_hold` | entry | Refuses to re-buy within N bars of selling |
+| `bad_data` | entry | A single bar moving more than `max_gap_pct` is suspect |
+| `stale_data` | entry | The feed is behind; do not buy blind |
+| `halted` | everything | A human must look before it resumes |
+
+The drawdown halt is a **bug and bad-data alarm, not a stop loss.** Set it above
+any drawdown the strategy legitimately produces. Set it too tight and it fires
+at the bottom and locks you out of the recovery — which is exactly what happened
+on the first generated run at a 45% threshold: the bot halted after 702 bars and
+spent 65% of the sample locked flat while the report showed a headline return as
+if it had traded throughout. The report now says so loudly, and the default is
+looser. Backtest first, then set the number.
+
+### Cost arithmetic
+
+Binary exposure trades the whole account on every flip, so the drag is larger
+than the same venue's drag on a risk-sized system:
+
+```
+annual drag = 2 × (fee + slippage) × flips_per_year × exposure
+```
+
+| Flips/year | At 15 bp per side |
+|---|---|
+| 4 | 1.2% |
+| 6 | 1.8% |
+| 12 | 3.6% |
+
+This is the number that decides whether a slower average is worth using. A
+longer period trades less and costs less, but enters and exits later.
+
+### Operating it
+
+- **Daily bars.** Faster timeframes multiply the flip count and the drag with it.
+- **Pass the full history each run.** The runner folds in new bars incrementally,
+  but the first run replays the history to work out which regime the market is
+  currently in, then makes one trade to match. That is what deploying into an
+  existing trend actually looks like.
+- **Set-and-forget does not mean unmonitored.** It means no discretionary
+  decisions. The failure mode of an unwatched bot is not a bad trade, it is
+  silence while holding a position nobody is looking at. `status` prints a data
+  age line — alarm on it.
+
+### What is not yet known
+
+Everything above is mechanism and arithmetic. On generated data the parameters
+show a broad plateau from SMA 150 to 250 rather than an isolated spike, which is
+the shape you want, but generated data has planted regimes and proves only that
+the code works. **No run against real BTC bars exists yet.** Until one does,
+treat the default of 200 as a reasonable prior, not a result.
+
+---
+
 ### Forward-testing with `paper`
 
 Forward tests cost calendar time, so start one before the backtest verdict is
@@ -498,8 +616,10 @@ t-statistic, so three lucky trades cannot win.
 | `confluence.py` | Which signal conditions actually earn their place. |
 | `reporting_html.py` | Self-contained HTML report. |
 | `paper.py` | Forward testing by reconciliation; state, journal, restart safety. |
+| `autopilot.py` | Set-and-forget trend allocator: spot, binary exposure, safety rails. |
+| `persistence.py` | Atomic state writes and append-only journals. |
 | `presets.py` | Instrument conventions (`btc`, `es`). |
 | `sources/binance.py` | Readers for Binance kline and aggTrades archives. |
 | `sources/fetch.py` | Downloader for those archives. |
-| `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`, `paper`. |
-| `tests/` | 228 unit tests, `unittest` only — no pytest required. |
+| `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`, `paper`, `autopilot`. |
+| `tests/` | 288 unit tests, `unittest` only — no pytest required. |

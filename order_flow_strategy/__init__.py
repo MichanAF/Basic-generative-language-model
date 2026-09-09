@@ -24,6 +24,13 @@ from .signals import Setup, Signal, SignalEngine
 from .backtest import Backtester, BacktestResult, ClosedTrade, OpenPosition
 from .metrics import PerformanceStats, summarize
 from .paper import Decision, PaperState, PaperTrader
+from .autopilot import (
+    Autopilot,
+    AutopilotConfig,
+    AutopilotResult,
+    AutopilotRunner,
+    AutopilotState,
+)
 
 __all__ = [
     "StrategyConfig",
@@ -44,6 +51,11 @@ __all__ = [
     "PaperTrader",
     "PaperState",
     "Decision",
+    "Autopilot",
+    "AutopilotConfig",
+    "AutopilotResult",
+    "AutopilotRunner",
+    "AutopilotState",
     "bars_from_trades",
     "load_bars_csv",
     "load_trades_csv",

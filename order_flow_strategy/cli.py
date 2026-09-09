@@ -31,6 +31,7 @@ from .data import (
     bars_from_trades,
     load_bars_csv,
     load_trades_csv,
+    synthetic_daily_bars,
     synthetic_trades,
 )
 from .metrics import summarize
@@ -42,6 +43,7 @@ from .baselines import buy_and_hold, trend_baseline
 from .confluence import analyse as analyse_confluence
 from .confluence import format_confluence
 from .reporting_html import build_report
+from .autopilot import Autopilot, AutopilotConfig, AutopilotRunner, format_autopilot
 from .funding import FundingSchedule
 from .paper import PaperTrader
 from .report import (
@@ -71,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("compare", "Run the strategy against trend-following and buy-and-hold."),
         ("report", "Write a self-contained HTML report of the whole comparison."),
         ("paper", "Forward-test against fresh bars, keeping state on disk."),
+        ("autopilot", "Set-and-forget trend allocator: spot, binary exposure."),
     ):
         s = sub.add_parser(name, help=help_text, description=help_text)
         _add_data_args(s)
@@ -121,7 +124,63 @@ def build_parser() -> argparse.ArgumentParser:
                 "--show-journal", type=int, default=10, metavar="N",
                 help="Print the last N journal entries (0 for none).",
             )
+        if name == "autopilot":
+            _add_autopilot_args(s)
     return p
+
+
+def _add_autopilot_args(s: argparse.ArgumentParser) -> None:
+    g = s.add_argument_group("autopilot")
+    g.add_argument("--sma", type=int, default=200, dest="ap_sma",
+                   help="Moving average period (default 200).")
+    g.add_argument("--band", type=float, default=0.03, dest="ap_band",
+                   help="Hysteresis band as a fraction (default 0.03).")
+    g.add_argument("--min-hold", type=int, default=5, dest="ap_min_hold",
+                   help="Bars before it may buy again after selling (default 5).")
+    g.add_argument("--exposure", type=float, default=1.0, dest="ap_exposure",
+                   help="Fraction of equity committed when risk-on (default 1.0).")
+    g.add_argument("--fee-rate", type=float, default=0.001, dest="ap_fee",
+                   help="Exchange fee per side as a fraction (default 0.001).")
+    g.add_argument("--slip-rate", type=float, default=0.0005, dest="ap_slip",
+                   help="Slippage per side as a fraction (default 0.0005).")
+    g.add_argument("--halt-drawdown", type=float, default=0.60, dest="ap_halt",
+                   help="Drawdown that halts the bot for inspection (default 0.60).")
+    g.add_argument("--max-bar-age", type=float, default=36.0, dest="ap_max_age",
+                   help="Hours before the feed counts as stale (default 36).")
+    g.add_argument("--capital", type=float, default=10_000.0, dest="ap_capital",
+                   help="Starting equity for the allocator (default 10000).")
+    g.add_argument("--days", type=int, default=1500, dest="ap_days",
+                   help="Synthetic daily bars to generate with --synthetic (default 1500).")
+
+    live = s.add_argument_group("autopilot: running it for real")
+    live.add_argument(
+        "--live", action="store_true",
+        help="Fold in new bars and keep a book on disk, instead of backtesting.",
+    )
+    live.add_argument("--state", default="autopilot/state.json", metavar="PATH",
+                      help="Where the book lives between runs.")
+    live.add_argument("--journal", default="autopilot/journal.jsonl", metavar="PATH",
+                      help="Append-only record of every decision.")
+    live.add_argument("--status-only", action="store_true",
+                      help="Print the book without processing new bars.")
+    live.add_argument("--clear-halt", action="store_true",
+                      help="Resume after a halt. Find out why it halted first.")
+    live.add_argument("--show-journal", type=int, default=10, metavar="N",
+                      help="Print the last N journal entries (0 for none).")
+
+
+def autopilot_config_from_args(args: argparse.Namespace) -> AutopilotConfig:
+    return AutopilotConfig(
+        sma_period=args.ap_sma,
+        band_pct=args.ap_band,
+        min_hold_bars=args.ap_min_hold,
+        target_exposure=args.ap_exposure,
+        fee_rate=args.ap_fee,
+        slippage_rate=args.ap_slip,
+        halt_drawdown_pct=args.ap_halt,
+        max_bar_age_seconds=args.ap_max_age * 3600.0,
+        starting_equity=args.ap_capital,
+    )
 
 
 def _add_data_args(s: argparse.ArgumentParser) -> None:
@@ -284,6 +343,13 @@ def load_funding(args: argparse.Namespace, cfg: StrategyConfig) -> Optional[Fund
 
 def load_bars(args: argparse.Namespace, cfg: StrategyConfig) -> List[Bar]:
     tick = cfg.tick_size
+    if args.command == "autopilot" and getattr(args, "synthetic", False):
+        # A slow allocator needs years of bars. Building those from a tick tape
+        # would take tens of millions of prints, so the price path is generated
+        # directly instead.
+        return synthetic_daily_bars(
+            n_bars=getattr(args, "ap_days", 1500), seed=args.seed, tick_size=tick
+        )
     if args.trades:
         trades = load_trades_csv(args.trades)
         if not trades:
@@ -509,6 +575,64 @@ def cmd_paper(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) ->
     print(DISCLAIMER)
 
 
+def cmd_autopilot(args: argparse.Namespace, bars: List[Bar], cfg: StrategyConfig) -> None:
+    """Backtest the allocator, or run it forward with a book on disk."""
+    ap_cfg = autopilot_config_from_args(args)
+    if len(bars) < ap_cfg.sma_period + 2:
+        raise SystemExit(
+            f"{len(bars)} bars is not enough for an SMA{ap_cfg.sma_period}. "
+            "Fetch a longer history, or lower --sma."
+        )
+
+    if not args.live:
+        result = Autopilot(ap_cfg).backtest(bars)
+        print(format_autopilot(result, f"Autopilot over {len(bars):,} bars"))
+        if getattr(args, "synthetic", False):
+            print(
+                "This ran on a generated tape whose regimes were placed by the\n"
+                "generator. A trend filter finding them proves the code works,\n"
+                "not that the rule does. Use real bars before believing a number.\n"
+            )
+        print(DISCLAIMER)
+        return
+
+    runner = AutopilotRunner(ap_cfg, state_path=args.state, journal_path=args.journal)
+    if args.clear_halt:
+        runner.clear_halt()
+        print("Halt cleared. The drawdown peak is rebased to current equity.\n")
+
+    if args.status_only:
+        print(runner.status())
+    else:
+        verdicts = runner.update(bars)
+        if not verdicts:
+            print(f"Nothing new. Newest bar already processed ({len(bars):,} seen).\n")
+        else:
+            print(f"{len(verdicts)} bar(s) processed:\n")
+            for v in verdicts:
+                flag = f" [{v.blocked_by}]" if v.blocked_by else ""
+                print(f"  {v.regime:<9}{flag} {v.reason}")
+            print()
+        print(runner.status())
+
+    if args.show_journal:
+        entries = runner.read_journal()[-args.show_journal :]
+        if entries:
+            print(f"Last {len(entries)} journal entries:")
+            for e in entries:
+                when = time.strftime("%Y-%m-%d", time.gmtime(e.get("bar_ts", 0)))
+                fill = e.get("fill")
+                did = (
+                    f"{fill['side']} {fill['units']:.6f} @ {fill['price']:,.2f}"
+                    if fill
+                    else "-"
+                )
+                print(f"  {when}  {e.get('regime', '?'):<9} {did:<28} "
+                      f"{e.get('reason', '')}")
+            print()
+    print(DISCLAIMER)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
@@ -531,6 +655,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cmd_report(args, bars, cfg)
     elif args.command == "paper":
         cmd_paper(args, bars, cfg)
+    elif args.command == "autopilot":
+        cmd_autopilot(args, bars, cfg)
     return 0
 
 

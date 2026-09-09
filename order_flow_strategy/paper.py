@@ -42,7 +42,6 @@ Nothing here touches an exchange or the network.
 """
 
 import json
-import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Callable, List, Optional, Sequence
@@ -52,6 +51,7 @@ from .config import StrategyConfig
 from .data import Bar
 from .footprint import EPS
 from .funding import FundingSchedule
+from .persistence import append_jsonl, atomic_write_json, load_dataclass, read_jsonl
 
 #: A runner takes bars and returns a result carrying ``open_position``.
 Runner = Callable[[Sequence[Bar]], BacktestResult]
@@ -129,33 +129,15 @@ def load_state(path: str, starting_equity: float) -> PaperState:
     Silently resetting on a parse error would mean a bot that quietly forgets
     an open position -- the worst possible failure for something holding risk.
     """
-    if not os.path.exists(path):
+    loaded = load_dataclass(path, PaperState, what="position")
+    if loaded is None:
         return PaperState(equity=starting_equity, started_at=time.time())
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
-        raise RuntimeError(
-            f"{path} exists but could not be read ({exc}). Refusing to start with "
-            "an unknown position -- inspect the file, do not delete it blindly."
-        ) from exc
-    if not isinstance(raw, dict):
-        raise RuntimeError(
-            f"{path} does not contain a state object. Refusing to start with an "
-            "unknown position."
-        )
-    known = set(PaperState.__dataclass_fields__)
-    return PaperState(**{k: v for k, v in raw.items() if k in known})
+    return loaded
 
 
 def save_state(path: str, state: PaperState) -> None:
     """Write atomically, so a crash mid-write cannot corrupt the state."""
-    directory = os.path.dirname(os.path.abspath(path))
-    os.makedirs(directory, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(asdict(state), fh, indent=2, sort_keys=True)
-    os.replace(tmp, path)
+    atomic_write_json(path, state)
 
 
 class PaperTrader:
@@ -375,16 +357,10 @@ class PaperTrader:
 
     # ------------------------------------------------------------------
     def _journal(self, decision: Decision) -> None:
-        directory = os.path.dirname(os.path.abspath(self.journal_path))
-        os.makedirs(directory, exist_ok=True)
-        with open(self.journal_path, "a", encoding="utf-8") as fh:
-            fh.write(decision.line() + "\n")
+        append_jsonl(self.journal_path, decision)
 
     def read_journal(self) -> List[dict]:
-        if not os.path.exists(self.journal_path):
-            return []
-        with open(self.journal_path, "r", encoding="utf-8") as fh:
-            return [json.loads(line) for line in fh if line.strip()]
+        return read_jsonl(self.journal_path)
 
     # ------------------------------------------------------------------
     def status(self, last_price: Optional[float] = None) -> str:

@@ -278,6 +278,51 @@ class TestCliCommands(unittest.TestCase):
             self.assertIn("none yet", out)
             self.assertFalse(os.path.exists(state))
 
+    def test_autopilot_backtests_on_generated_daily_bars(self):
+        code, out = self._run(["autopilot", "--synthetic", "--days", "900", "--sma", "100"])
+        self.assertEqual(code, 0)
+        self.assertIn("buy and hold", out)
+        self.assertIn("regime flips a year", out)
+        self.assertIn("not that the rule does", out)
+
+    def test_autopilot_refuses_a_history_shorter_than_its_average(self):
+        with self.assertRaises(SystemExit):
+            self._run(["autopilot", "--synthetic", "--days", "300", "--sma", "500"])
+
+    def test_autopilot_live_keeps_a_book_and_is_safe_to_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, "ap", "state.json")
+            journal = os.path.join(tmp, "ap", "journal.jsonl")
+            argv = [
+                "autopilot", "--live", "--synthetic", "--days", "900",
+                "--sma", "100", "--state", state, "--journal", journal,
+            ]
+            code, out = self._run(argv)
+            self.assertEqual(code, 0)
+            self.assertIn("Autopilot status", out)
+            self.assertIn("No orders are placed", out)
+            self.assertTrue(os.path.exists(state))
+
+            with open(journal, encoding="utf-8") as fh:
+                first = fh.read()
+            code, out = self._run(argv)
+            self.assertEqual(code, 0)
+            self.assertIn("Nothing new", out)
+            with open(journal, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), first)
+
+    def test_autopilot_status_only_does_not_write_a_book(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, "state.json")
+            code, out = self._run([
+                "autopilot", "--live", "--status-only", "--synthetic",
+                "--days", "900", "--sma", "100", "--state", state,
+                "--journal", os.path.join(tmp, "j.jsonl"),
+            ])
+            self.assertEqual(code, 0)
+            self.assertIn("no bars processed yet", out)
+            self.assertFalse(os.path.exists(state))
+
     def test_requires_a_data_source(self):
         with self.assertRaises(SystemExit):
             self._run(["backtest"])

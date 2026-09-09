@@ -1,6 +1,7 @@
 """Bars, trades, CSV loading, and a synthetic tape for testing the mechanics."""
 
 import csv
+import math
 import random
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -374,3 +375,66 @@ def synthetic_bars(
     """Convenience wrapper: synthetic tape aggregated into bars."""
     cfg = cfg or SyntheticConfig()
     return bars_from_trades(synthetic_trades(cfg), timeframe_seconds, cfg.tick_size)
+
+
+def synthetic_daily_bars(
+    n_bars: int = 1_500,
+    seed: int = 7,
+    start_price: float = 10_000.0,
+    bar_seconds: float = 86_400.0,
+    tick_size: float = 10.0,
+    start_ts: float = 0.0,
+) -> List[Bar]:
+    """A regime-switching random walk, for exercising slow allocators.
+
+    The tick generator cannot practically produce years of daily bars -- a
+    thousand of them would need tens of millions of prints. This produces the
+    price path directly instead.
+
+    It alternates between bull, bear and directionless regimes with persistent
+    drift, because that is the structure a trend filter exists to exploit and a
+    plain random walk contains none of it. That also makes it worthless as
+    evidence: a filter finding regimes that were deliberately planted proves
+    the code runs, nothing more. Footprints are proxies and carry no order-flow
+    information, so do not point the order-flow engine at this.
+    """
+    if n_bars < 1:
+        raise ValueError("n_bars must be positive")
+    if start_price <= 0:
+        raise ValueError("start_price must be positive")
+
+    rnd = random.Random(seed)
+    # (daily drift, daily volatility, expected regime length in bars)
+    regimes = ((0.0030, 0.030, 260), (-0.0035, 0.035, 150), (0.0000, 0.025, 120))
+
+    price = start_price
+    bars: List[Bar] = []
+    drift, vol, mean_len = regimes[0]
+    left = mean_len
+
+    for i in range(n_bars):
+        if left <= 0:
+            drift, vol, mean_len = regimes[rnd.randrange(len(regimes))]
+            left = max(20, int(rnd.expovariate(1.0 / mean_len)))
+        left -= 1
+
+        open_ = price
+        price = max(price * math.exp(rnd.gauss(drift, vol)), tick_size)
+        high = max(open_, price) * (1.0 + abs(rnd.gauss(0.0, vol / 3)))
+        low = min(open_, price) * (1.0 - abs(rnd.gauss(0.0, vol / 3)))
+        volume = max(1.0, rnd.lognormvariate(6.0, 0.4))
+        bars.append(
+            Bar(
+                ts=start_ts + i * bar_seconds,
+                open=open_,
+                high=high,
+                low=max(low, tick_size),
+                close=price,
+                volume=volume,
+                footprint=Footprint.from_ohlcv_proxy(
+                    open_=open_, high=high, low=max(low, tick_size), close=price,
+                    volume=volume, tick_size=tick_size,
+                ),
+            )
+        )
+    return bars
