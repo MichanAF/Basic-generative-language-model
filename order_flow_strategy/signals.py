@@ -48,6 +48,7 @@ TAG_KEYWORDS = (
     ("high_volume_node", "high_volume_node"),
     ("retest_hold", "retest_hold"),
     ("polarity_flip", "polarity_flip"),
+    ("momentum candle", "momentum"),
     ("wick", "wick_rejection"),
 )
 
@@ -295,8 +296,8 @@ class SignalEngine:
                 continue  # timed out, drop it
 
             ok, reasons, fatal = (
-                self._c2_ok_short(bar, setup) if setup.direction == SHORT
-                else self._c2_ok_long(bar, setup)
+                self._c2_ok_short(bar, setup, atr_value) if setup.direction == SHORT
+                else self._c2_ok_long(bar, setup, atr_value)
             )
             if not ok:
                 # Fatal means the setup is wrong, not early: price took out
@@ -314,7 +315,37 @@ class SignalEngine:
         self.setups = surviving
         return signals
 
-    def _c2_ok_short(self, bar: Bar, setup: Setup) -> Tuple[bool, List[str], bool]:
+    def _momentum(self, bar: Bar, atr_value: float) -> Tuple[bool, Optional[str], bool]:
+        """Did candle 2 leave the level with expansion? ``(ok, reason, is_momentum)``.
+
+        Candle 2 is the bar leaving the level, so its range against ATR is the
+        question of whether price left with conviction or merely drifted off.
+
+        The reason string is emitted whenever the expansion is there, even when
+        ``require_momentum`` is off, so the condition is measurable before it is
+        ever enforced.
+        """
+        cfg = self.cfg
+        if atr_value <= EPS:
+            # No usable volatility estimate. Refusing to judge is right; a
+            # zero denominator would make every candle look like momentum.
+            return True, None, False
+
+        ratio = bar.range / atr_value
+        if ratio >= cfg.momentum_atr_mult:
+            return True, f"momentum candle: range {ratio:.2f}x ATR", True
+        if cfg.require_momentum:
+            return (
+                False,
+                f"candle 2 range {ratio:.2f}x ATR, under the "
+                f"{cfg.momentum_atr_mult:.2f}x momentum threshold",
+                False,
+            )
+        return True, None, False
+
+    def _c2_ok_short(
+        self, bar: Bar, setup: Setup, atr_value: float
+    ) -> Tuple[bool, List[str], bool]:
         """``(confirmed, reasons, fatal)``.
 
         ``fatal`` marks the setup as wrong rather than early -- price either
@@ -342,16 +373,21 @@ class SignalEngine:
         if cfg.c2_delta_must_worsen and bar.normalized_delta > c1.normalized_delta:
             return False, ["candle 2 delta weaker than candle 1"], False
 
-        return (
-            True,
-            [
-                f"candle 2 closed {bar.close:.2f}, below {threshold:.2f}",
-                f"candle 2 delta {bar.normalized_delta:+.0%}",
-            ],
-            False,
-        )
+        mom_ok, mom_reason, _ = self._momentum(bar, atr_value)
+        if not mom_ok:
+            return False, [mom_reason], False
 
-    def _c2_ok_long(self, bar: Bar, setup: Setup) -> Tuple[bool, List[str], bool]:
+        reasons = [
+            f"candle 2 closed {bar.close:.2f}, below {threshold:.2f}",
+            f"candle 2 delta {bar.normalized_delta:+.0%}",
+        ]
+        if mom_reason:
+            reasons.append(mom_reason)
+        return True, reasons, False
+
+    def _c2_ok_long(
+        self, bar: Bar, setup: Setup, atr_value: float
+    ) -> Tuple[bool, List[str], bool]:
         cfg = self.cfg
         c1 = setup.c1
 
@@ -373,14 +409,17 @@ class SignalEngine:
         if cfg.c2_delta_must_worsen and bar.normalized_delta < c1.normalized_delta:
             return False, ["candle 2 delta weaker than candle 1"], False
 
-        return (
-            True,
-            [
-                f"candle 2 closed {bar.close:.2f}, above {threshold:.2f}",
-                f"candle 2 delta {bar.normalized_delta:+.0%}",
-            ],
-            False,
-        )
+        mom_ok, mom_reason, _ = self._momentum(bar, atr_value)
+        if not mom_ok:
+            return False, [mom_reason], False
+
+        reasons = [
+            f"candle 2 closed {bar.close:.2f}, above {threshold:.2f}",
+            f"candle 2 delta {bar.normalized_delta:+.0%}",
+        ]
+        if mom_reason:
+            reasons.append(mom_reason)
+        return True, reasons, False
 
     # ------------------------------------------------------------------
     def _build_signal(

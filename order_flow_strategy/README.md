@@ -237,7 +237,22 @@ Required to confirm:
 - close beyond `c2_close_beyond_c1_frac` of candle 1's range, measured down from
   candle 1's high (0.5 = below candle 1's midpoint, 1.0 = below its low);
 - normalized delta ≤ `c2_delta_max`;
-- optionally weaker than candle 1's delta (`c2_delta_must_worsen`).
+- optionally weaker than candle 1's delta (`c2_delta_must_worsen`);
+- optionally a **momentum candle** (`require_momentum`), meaning its range is at
+  least `momentum_atr_mult` × ATR.
+
+The momentum condition is worth a note on how it is meant to be used. Candle 2
+is the bar leaving the level, so its range against ATR asks whether price left
+with conviction or merely drifted off. Expansion beyond normal volatility is the
+observable difference between a level that pushed price away and one price
+wandered back through.
+
+`require_momentum` is **off** by default, and the condition is still tagged on
+every signal that has it. That is deliberate: `confluence` then reports
+expectancy with and without it, so the data decides whether it earns its place
+before it is ever enforced. Turning a filter on before measuring it is how you
+end up with a rule nobody can defend. Enforce it only once a real-data run says
+the lift is there.
 
 Entry goes on immediately, two ways:
 
@@ -622,4 +637,4 @@ t-statistic, so three lucky trades cannot win.
 | `sources/binance.py` | Readers for Binance kline and aggTrades archives. |
 | `sources/fetch.py` | Downloader for those archives. |
 | `cli.py` | `backtest`, `optimize`, `scan`, `demo`, `compare`, `report`, `paper`, `autopilot`. |
-| `tests/` | 288 unit tests, `unittest` only — no pytest required. |
+| `tests/` | 302 unit tests, `unittest` only — no pytest required. |

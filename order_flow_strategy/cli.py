@@ -253,6 +253,14 @@ def _add_strategy_args(s: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--wick-frac", type=float, help="Minimum candle-1 rejection wick fraction.")
     g.add_argument(
+        "--momentum-atr", type=float, dest="momentum_atr_mult",
+        help="Candle-2 range as a multiple of ATR that counts as momentum (default 1.0).",
+    )
+    g.add_argument(
+        "--require-momentum", action="store_true",
+        help="Reject setups whose candle 2 leaves the level without that expansion.",
+    )
+    g.add_argument(
         "--c2-close-frac",
         type=float,
         dest="c2_close_beyond_c1_frac",
@@ -298,6 +306,7 @@ def config_from_args(args: argparse.Namespace) -> StrategyConfig:
         "commission_per_side",
         "commission_pct",
         "wick_frac",
+        "momentum_atr_mult",
         "c2_close_beyond_c1_frac",
         "time_stop_bars",
         "session_start_min",
@@ -322,6 +331,8 @@ def config_from_args(args: argparse.Namespace) -> StrategyConfig:
         overrides["require_flow_evidence"] = False
     if getattr(args, "allow_chart_levels", False):
         overrides["require_flow_backed_levels"] = False
+    if getattr(args, "require_momentum", False):
+        overrides["require_momentum"] = True
 
     preset = getattr(args, "preset", None)
     if preset:

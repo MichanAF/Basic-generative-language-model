@@ -106,6 +106,21 @@ class StrategyConfig:
     c2_delta_must_worsen: bool = False
     #: If False, candle 2 taking out candle 1's extreme kills the setup.
     allow_c2_new_extreme: bool = False
+
+    #: What counts as a *momentum* candle 2: its range as a multiple of ATR.
+    #: Candle 2 is the one leaving the level, so this asks whether price left
+    #: with conviction or merely drifted off. Expansion beyond normal
+    #: volatility is the observable difference between a level that pushed
+    #: price away and one price wandered back through.
+    momentum_atr_mult: float = 1.0
+    #: Whether a setup without that expansion is rejected.
+    #:
+    #: Off by default, and deliberately so: with it off the condition is still
+    #: tagged on every signal that has it, so ``confluence`` can report
+    #: expectancy with and without and say whether it earns its place. Turning
+    #: a filter on before measuring it is how you end up with a rule nobody
+    #: can defend.
+    require_momentum: bool = False
     entry_mode: str = ENTRY_CLOSE_OF_2
     #: For ``break_of_2``: bars the resting stop order stays live.
     entry_valid_bars: int = 2
@@ -197,6 +212,8 @@ class StrategyConfig:
             raise ValueError("max_leverage must be positive, or None for uncapped")
         if not self.trade_shorts and not self.trade_longs:
             raise ValueError("at least one of trade_shorts / trade_longs must be on")
+        if self.momentum_atr_mult <= 0:
+            raise ValueError("momentum_atr_mult must be positive")
 
     def with_(self, **overrides) -> "StrategyConfig":
         """Return a copy with ``overrides`` applied."""
