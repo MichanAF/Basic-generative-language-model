@@ -2,3 +2,12 @@
 node_modules
 .tmp
 npm-debug.log
+__pycache__/
+*.py[cod]
+
+# Paper-trading book and audit journal. Machine-local runtime state, and the
+# journal grows without bound; it belongs on the box that produced it.
+paper/
+autopilot/
+*.jsonl
+report.html
